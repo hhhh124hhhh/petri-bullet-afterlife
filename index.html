@@ -230,9 +230,10 @@
     if (len > DEAD) {
       const nx = dx / len;
       const ny = dy / len;
-      // 响应曲线：小幅度推动也给足速度（pow<1 让前段更陡），拒绝"肉"
+      // 响应曲线：小幅度推动也给足速度。soak 实测慢速小拖只走一点点是"不丝滑"主因，
+      // 把指数从 0.7 降到 0.45，前段更陡：推 10px 即半速，推 20px 约 2/3 速
       const t = Math.min(1, (len - DEAD) / (STICK_RADIUS - DEAD));
-      const strength = Math.pow(t, 0.7);
+      const strength = Math.pow(t, 0.45);
       stick.x = nx * strength;
       stick.y = ny * strength;
     } else {
