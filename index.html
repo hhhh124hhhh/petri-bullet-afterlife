@@ -65,6 +65,7 @@
   const ENEMY_SEPARATION = 26;// 敌人分离强度系数
   const INVOKED_IFRAME = 0.45; // 无敌帧时长（秒）
   const ENEMY_R = ENEMY_SIZE / 2; // 敌人逻辑半径（碰撞用）
+  const PLAYER_R = 12; // 主角逻辑半径（size 24 / 2；怪不许叠进人的推开距离用）
 
   // ===== 战斗参数（Prototype 1）=====
   const ENEMY_MAX_HP = 70;   // 敌人血量上限
@@ -1142,6 +1143,15 @@
       e.vy = (dy / d) * ENEMY_SPEED + e.sy;
       e.x += e.vx * dt;
       e.y += e.vy * dt;
+      // 怪-人位置推开（只推怪，不碰主角速度）：P0 关掉的是"怪撞人"的击退手感，
+      // 这里补的是视觉分离——怪不许叠进主角。包围点在 30-46px，推开距离 20px 不打架。
+      const qx = e.x - player.x, qy = e.y - player.y;
+      const qd = Math.hypot(qx, qy);
+      const minD = PLAYER_R + ENEMY_R;
+      if (qd < minD && qd > 0.0001) {
+        e.x = player.x + qx / qd * minD;
+        e.y = player.y + qy / qd * minD;
+      }
     }
 
     // —— P0 曾关闭碰撞击退（避免包围圈形成"人群阻力"）；P1 仍不处理碰撞伤害，
