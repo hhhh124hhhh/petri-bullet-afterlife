@@ -471,8 +471,9 @@
       stick.returnT = Math.min(1, stick.returnT + dt * 5);
       const ease = 1 - stick.returnT;
       if (ease > 0.01) {
-        const kx = lerp(stick.knobX, 0, ease * 0.35 + 0.0);
-        const ky = lerp(stick.knobY, 0, ease * 0.35 + 0.0);
+        // 回中：向摇杆中心 origin 插值，而不是向 (0,0)
+        const kx = lerp(stick.knobX, stick.originX, ease * 0.35);
+        const ky = lerp(stick.knobY, stick.originY, ease * 0.35);
         ctx.save();
         ctx.globalAlpha = 0.4 * ease;
         ctx.fillStyle = COLOR_PLAYER;
