@@ -358,30 +358,70 @@
     }
   }
 
-  // 死亡爆裂：14 粒，橙白混合径向飞散
-  const BURST_COUNT = 14;
+  // 死亡爆裂：24 粒，橙白混合径向飞散（P1 反馈加强版：量大、初速高）
+  const BURST_COUNT = 24;
   function spawnDeathBurst(x, y) {
     const base = Math.random() * Math.PI * 2;
     for (let i = 0; i < BURST_COUNT; i++) {
       const a = base + (i / BURST_COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
-      const sp = 60 + Math.random() * 160; // 60~220 px/s
+      const sp = 80 + Math.random() * 180; // 80~260 px/s
       spawnParticle(
         x, y,
         Math.cos(a) * sp, Math.sin(a) * sp,
         0.35 + Math.random() * 0.25,       // 0.35~0.6s
-        3.5 + Math.random() * 3.5,
+        4 + Math.random() * 4,
         i % 3 === 0 ? PARTICLE_SPRITES[P_WHITE] : PARTICLE_SPRITES[P_ORANGE]
       );
     }
   }
 
-  // —— 伤害结算：白闪 + 死亡反馈（death 触发爆裂与微顿）——
+  // —— 伤害结算：白闪 + 死亡反馈（death 触发爆裂、微顿、震屏）——
   let hitStop = 0; // 剩余微顿时间（秒），由 frame() 消费
+  let shake = 0;   // 屏幕震动强度（px），frame() 里按真实时间衰减
+
+  // —— 伤害数字对象池（24 个，命中即刷，不扩容）——
+  const DMG_NUM_POOL = 24;
+  const dmgNums = [];
+  for (let i = 0; i < DMG_NUM_POOL; i++) {
+    dmgNums.push({ life: 0, maxLife: 0.6, x: 0, y: 0, value: 0 });
+  }
+  let dmgNumCursor = 0;
+  function spawnDmgNum(x, y, value) {
+    const d = dmgNums[dmgNumCursor];
+    dmgNumCursor = (dmgNumCursor + 1) % DMG_NUM_POOL;
+    d.x = x + (Math.random() - 0.5) * 10;
+    d.y = y - 8;
+    d.value = Math.round(value);
+    d.life = d.maxLife;
+  }
+  function updateDmgNums(dt) {
+    for (let i = 0; i < DMG_NUM_POOL; i++) {
+      const d = dmgNums[i];
+      if (d.life <= 0) continue;
+      d.life -= dt;
+      d.y -= 38 * dt; // 上浮
+    }
+  }
+  function drawDmgNums() {
+    ctx.save();
+    ctx.font = 'bold 13px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    for (let i = 0; i < DMG_NUM_POOL; i++) {
+      const d = dmgNums[i];
+      if (d.life <= 0) continue;
+      const k = d.life / d.maxLife;
+      ctx.globalAlpha = Math.min(1, k * 1.6);
+      ctx.fillStyle = '#ffd75e';
+      ctx.fillText(d.value, d.x, d.y);
+    }
+    ctx.restore();
+  }
 
   function hitEnemy(e, dmg) {
     if (!e.alive) return;
     e.hp -= dmg;
     e.flash = FLASH_TIME;
+    spawnDmgNum(e.x, e.y, dmg);
     if (e.hp <= 0) {
       e.alive = false;
       e.hp = 0;
@@ -389,6 +429,8 @@
       spawnDeathBurst(e.x, e.y);
       // 40ms 微顿：连续死亡不断刷新为 0.04s，手感上就是"一串黏住的顿"
       hitStop = HIT_STOP;
+      // 死亡震屏：叠加但封顶 7px，连杀不糊
+      shake = Math.min(shake + 2.5, 7);
     }
   }
 
@@ -1056,13 +1098,15 @@
     // 40ms 微 hit-stop：死亡瞬间冻结逻辑时间——子步进与 elapsed 都不推进，
     // 但照常 draw()。这一帧"画面定格"就是打击感的来源（不做震屏、不做伤害数字）。
     // 连续击杀时 hitEnemy 会把 hitStop 反复刷回 0.04s，形成黏住的连顿。
+    // 震屏衰减：按真实时间线性衰减，7px 约 0.22s 回零
+    if (shake > 0) shake = Math.max(0, shake - 32 * dt);
+
     let stopped = false;
     if (hitStop > 0) {
       hitStop -= dt;
       if (hitStop < 0) hitStop = 0;
       stopped = true;
-    } else {
-      elapsed += dt;
+    } else {      elapsed += dt;
 
       // 定步长子步进：此前单帧 dt 钳在 0.05s，导致帧率低于 20fps 时游戏时间比真实时间慢
       // （角色/敌人全部慢动作——正是"慢半拍"的根因）。子步进保证帧率再低，速度也与真实时间一致。
@@ -1162,6 +1206,7 @@
     updateNeedles(dt);
     updateArcs(dt);
     updateParticles(dt);
+    updateDmgNums(dt);
   }
 
   function draw(t) {
@@ -1171,6 +1216,13 @@
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     if (bgCanvas) ctx.drawImage(bgCanvas, 0, 0);
     ctx.restore();
+
+    // 震屏：世界层叠加随机偏移（背景/UI 摇杆不抖）
+    if (shake > 0.15) {
+      ctx.setTransform(scale, 0, 0, scale,
+        offX + (Math.random() - 0.5) * shake,
+        offY + (Math.random() - 0.5) * shake);
+    }
 
     // 敌人（内部跳过死亡个体）
     for (let i = 0; i < enemies.length; i++) {
@@ -1195,7 +1247,11 @@
     // 粒子（爆裂/火花在最上层）
     drawParticles();
 
-    // 摇杆
+    // 伤害数字（粒子之上、摇杆之下）
+    drawDmgNums();
+
+    // 摇杆（UI 层：先清掉震屏偏移，摇杆不抖）
+    ctx.setTransform(scale, 0, 0, scale, offX, offY);
     drawStick(dtForStick());
   }
 
