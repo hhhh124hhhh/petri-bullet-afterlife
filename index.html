@@ -508,15 +508,26 @@
   let elapsed = 0;
 
   function frame(now) {
-    // delta 时间（秒），上限 0.05s 防止切后台后大跳
+    // 真实流逝（秒）；上限 0.25s，只防切后台后的死亡螺旋
     let dt = (now - lastTime) / 1000;
     lastTime = now;
-    if (dt > 0.05) dt = 0.05;
+    if (dt > 0.25) dt = 0.25;
     if (dt < 0) dt = 0;
     elapsed += dt;
+
+    // 定步长子步进：此前单帧 dt 钳在 0.05s，导致帧率低于 20fps 时游戏时间比真实时间慢
+    // （角色/敌人全部慢动作——正是"慢半拍"的根因）。子步进保证帧率再低，速度也与真实时间一致。
+    const STEP = 1 / 60;
+    let remaining = dt;
+    let guard = 0;
+    while (remaining > 1e-6 && guard < 20) {
+      const h = Math.min(remaining, STEP);
+      update(h);
+      remaining -= h;
+      guard++;
+    }
     lastDt = dt;
 
-    update(dt);
     draw(elapsed);
     requestAnimationFrame(frame);
   }
