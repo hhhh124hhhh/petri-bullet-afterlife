@@ -153,8 +153,12 @@
     y: LOGICAL_H - 140,
     size: 24,
     invuln: 0,     // 剩余无敌时间
-    animTime: 0     // 浮动动画计时
+    animTime: 0,   // 浮动动画计时
+    hp: 100, maxHp: 100, // 生命（P1：怪有接触伤害了，主角得有血条）
+    hurtFlash: 0,  // 受击红闪计时
+    deadT: 0       // 死亡复活倒计时（P1 极简：1.2s 后原地满血复活，不做结算）
   };
+  const ENEMY_TOUCH_DMG = 8; // 怪接触伤害
 
   // ===== 敌人集合 =====
   // 场上恒定 20 只：数组只在初始化时 push 一次，之后死亡/重生只改字段，不增删
@@ -1128,17 +1132,29 @@
   }
 
   function update(dt) {
-    // —— 玩家移动（摇杆归一化方向 × 移速）——
-    const moveLen = Math.hypot(stick.x, stick.y);
-    if (moveLen > 0.001) {
-      player.x += stick.x * PLAYER_SPEED * dt;
-      player.y += stick.y * PLAYER_SPEED * dt;
+    // —— 玩家移动（摇杆归一化方向 × 移速）；死亡复活读秒时不动 ——
+    if (player.deadT <= 0) {
+      const moveLen = Math.hypot(stick.x, stick.y);
+      if (moveLen > 0.001) {
+        player.x += stick.x * PLAYER_SPEED * dt;
+        player.y += stick.y * PLAYER_SPEED * dt;
+      }
+    } else {
+      // 死亡：1.2s 后原地满血复活，敌人回边缘（P1 极简，不做结算）
+      player.deadT -= dt;
+      if (player.deadT <= 0) {
+        player.deadT = 0;
+        player.hp = player.maxHp;
+        player.invuln = 1.0;
+        for (let i = 0; i < enemies.length; i++) respawnEnemy(enemies[i], i);
+      }
     }
     clampToBounds(player, player.size / 2, player.size / 2);
 
-    // 浮动动画计时 + 无敌帧计时
+    // 浮动动画计时 + 无敌帧计时 + 受击红闪计时
     player.animTime += dt;
     if (player.invuln > 0) player.invuln -= dt;
+    if (player.hurtFlash > 0) player.hurtFlash -= dt;
 
     // —— 敌人追踪：瞄准玩家周围的包围点（形成环绕，而非堆叠在玩家身上）——
     // 分离力两阶段计算：先算完所有推力再统一施加，避免"后算的外层循环覆盖先算的结果"
@@ -1195,6 +1211,18 @@
       if (qd < minD && qd > 0.0001) {
         e.x = player.x + qx / qd * minD;
         e.y = player.y + qy / qd * minD;
+      }
+      // 接触伤害：怪贴住主角就咬（0.45s 无敌帧）。P1 之前怪是木桩，这是威胁的来源。
+      if (qd < minD + 4 && player.invuln <= 0 && player.deadT <= 0) {
+        player.hp -= ENEMY_TOUCH_DMG;
+        player.invuln = INVOKED_IFRAME;
+        player.hurtFlash = 0.3;
+        shake = Math.min(shake + 3, 8);
+        spawnDmgNum(player.x, player.y - 10, ENEMY_TOUCH_DMG);
+        if (player.hp <= 0) {
+          player.hp = 0;
+          player.deadT = 1.2; // P1 极简死亡：1.2s 后原地满血复活
+        }
       }
     }
 
@@ -1253,6 +1281,33 @@
     // 摇杆（UI 层：先清掉震屏偏移，摇杆不抖）
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     drawStick(dtForStick());
+
+    // 血条（顶部居中）
+    const hbW = 120, hbH = 8, hbX = (LOGICAL_W - hbW) / 2, hbY = 10;
+    ctx.fillStyle = 'rgba(10,20,28,0.7)';
+    ctx.fillRect(hbX - 1, hbY - 1, hbW + 2, hbH + 2);
+    const hpK = player.hp / player.maxHp;
+    ctx.fillStyle = hpK > 0.3 ? '#38e8e0' : '#ff5a5a';
+    ctx.fillRect(hbX, hbY, hbW * hpK, hbH);
+
+    // 受击红闪（全屏低透明红）
+    if (player.hurtFlash > 0) {
+      ctx.globalAlpha = Math.min(0.35, player.hurtFlash);
+      ctx.fillStyle = '#ff3b3b';
+      ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+      ctx.globalAlpha = 1;
+    }
+
+    // 死亡：中央提示（P1 极简）
+    if (player.deadT > 0) {
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, player.deadT);
+      ctx.fillStyle = '#ff5a5a';
+      ctx.font = 'bold 20px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('信号中断…', LOGICAL_W / 2, LOGICAL_H / 2 - 40);
+      ctx.restore();
+    }
   }
 
   // drawStick 需要 dt 做回中插值，这里保存最近一帧的 dt
