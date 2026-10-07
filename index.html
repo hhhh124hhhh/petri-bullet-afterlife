@@ -74,9 +74,11 @@
   // ===== 自适应缩放：把逻辑坐标映射到实际画布尺寸 =====
   let scale = 1;
   let dpr = 1;
+  let offX = 0, offY = 0; // contain 居中偏移（模块级，供背景烘焙使用）
 
   function resize() {
-    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    // DPR 上限 2：移动端 fill-rate 优先，2x 对本作像素风已足够锐利
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.getBoundingClientRect();
     const cssW = Math.max(1, Math.round(rect.width));
     const cssH = Math.max(1, Math.round(rect.height));
@@ -87,11 +89,13 @@
 
     // 逻辑 360x640 等比缩放铺满画布（contain），居中
     scale = Math.min(canvas.width / LOGICAL_W, canvas.height / LOGICAL_H);
-    const offX = (canvas.width - LOGICAL_W * scale) / 2;
-    const offY = (canvas.height - LOGICAL_H * scale) / 2;
+    offX = (canvas.width - LOGICAL_W * scale) / 2;
+    offY = (canvas.height - LOGICAL_H * scale) / 2;
 
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     ctx.imageSmoothingEnabled = true;
+
+    renderBackground(); // 尺寸变化时重烘背景
   }
 
   window.addEventListener('resize', resize);
@@ -127,10 +131,47 @@
       vy: 0,
       seed: Math.random() * Math.PI * 2,
       wobble: 0.6 + Math.random() * 0.8, // 每只细胞的蠕动相位频率
-      orbitR: 30 + Math.random() * 16    // 包围半径：瞄准玩家周围而非玩家中心，避免堆叠成一团
+      orbitR: 30 + Math.random() * 16,   // 包围半径：瞄准玩家周围而非玩家中心，避免堆叠成一团
+      sprite: ENEMY_SPRITES[i % ENEMY_SPRITES.length] // 预渲染精灵
     });
   }
 
+  // 敌人精灵烘焙（2x 超采样：96px 画布对应 48 逻辑像素），3 种形态轮换
+  function makeEnemySprite(seed) {
+    const S = 96;
+    const c = document.createElement('canvas');
+    c.width = S; c.height = S;
+    const g = c.getContext('2d');
+    const cx = S / 2, cy = S / 2;
+    const r = (ENEMY_SIZE / 2) * 2; // 逻辑半径 8 → 精灵内 16
+    function blob(x, y, rr, sd, inflate) {
+      const lobes = 7;
+      g.beginPath();
+      for (let i = 0; i <= lobes; i++) {
+        const a = (i / lobes) * Math.PI * 2;
+        const w = 1 + Math.sin(a * 3 + sd) * 0.12 + Math.cos(a * 2 - sd) * 0.07;
+        const q = rr * w + inflate;
+        const px = x + Math.cos(a) * q;
+        const py = y + Math.sin(a) * q;
+        if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+      }
+      g.closePath();
+    }
+    // 深紫描边底
+    g.fillStyle = COLOR_OUTLINE;
+    blob(cx, cy, r + 4.4, seed, 2); g.fill();
+    // 橙色主体
+    g.fillStyle = COLOR_ENEMY;
+    blob(cx, cy, r, seed, 0); g.fill();
+    // 内部暗核 + 高光
+    g.fillStyle = COLOR_OUTLINE; g.globalAlpha = 0.55;
+    g.beginPath(); g.arc(cx - r * 0.18, cy + r * 0.2, r * 0.3, 0, Math.PI * 2); g.fill();
+    g.globalAlpha = 0.5; g.fillStyle = COLOR_WHITE;
+    g.beginPath(); g.arc(cx - r * 0.34, cy - r * 0.36, r * 0.22, 0, Math.PI * 2); g.fill();
+    g.globalAlpha = 1;
+    return c;
+  }
+  const ENEMY_SPRITES = [makeEnemySprite(0.7), makeEnemySprite(2.83), makeEnemySprite(4.96)];
   for (let i = 0; i < ENEMY_COUNT; i++) spawnEnemy(i);
 
   // ===== 摇杆状态 =====
@@ -239,8 +280,10 @@
 
   canvas.addEventListener('touchmove', function (e) {
     e.preventDefault();
-    for (let i = 0; i < e.changedTouches.length; i++) {
-      const t = e.changedTouches[i];
+    // 取合并触摸事件的最新位置，减少输入延迟
+    const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || e.changedTouches;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
       if (t.identifier === stick.pointerId) {
         const p = toLogical(t.clientX, t.clientY);
         stickMove({ id: t.identifier, x: p.x, y: p.y });
@@ -260,102 +303,92 @@
   canvas.addEventListener('touchend', endTouch, { passive: false });
   canvas.addEventListener('touchcancel', endTouch, { passive: false });
 
-  // ===== 程序绘制：玩家 PETRI-07 =====
-  function drawPlayer(x, y, t, alpha) {
-    const s = player.size;
-    const half = s / 2;
+  // 玩家精灵烘焙（2x 超采样：128px 对应 64 逻辑像素；核心灯单独动态绘制以保留脉冲）
+  let playerSprite = null;
+  function makePlayerSprite() {
+    const S = 128;
+    const c = document.createElement('canvas');
+    c.width = S; c.height = S;
+    const g = c.getContext('2d');
+    const cx = S / 2, cy = S / 2; // 对应逻辑坐标 (0,0)
+    function rr(x, y, w, h, r) {
+      r = Math.min(r, w / 2, h / 2);
+      g.beginPath();
+      g.moveTo(x + r, y);
+      g.lineTo(x + w - r, y);
+      g.arcTo(x + w, y, x + w, y + r, r);
+      g.lineTo(x + w, y + h - r);
+      g.arcTo(x + w, y + h, x + w - r, y + h, r);
+      g.lineTo(x + r, y + h);
+      g.arcTo(x, y + h, x, y + h - r, r);
+      g.lineTo(x, y + r);
+      g.arcTo(x, y, x + r, y, r);
+      g.closePath();
+    }
+    g.lineJoin = 'round';
+    // —— 深紫粗描边底 ——
+    g.strokeStyle = COLOR_OUTLINE;
+    g.lineWidth = 6.4;
+    rr(cx - 19, cy - 19, 38, 36, 10); g.stroke(); // 身体
+    g.beginPath(); g.moveTo(cx, cy - 19); g.lineTo(cx, cy - 29); g.stroke(); // 天线
+    g.beginPath(); // 两侧小臂
+    g.moveTo(cx - 19, cy + 2); g.lineTo(cx - 27, cy + 2);
+    g.moveTo(cx + 19, cy + 2); g.lineTo(cx + 27, cy + 2);
+    g.stroke();
+    // —— 白色主体 ——
+    g.fillStyle = COLOR_WHITE;
+    rr(cx - 19, cy - 19, 38, 36, 10); g.fill();
+    // 头顶盖
+    g.strokeStyle = COLOR_OUTLINE; g.lineWidth = 3.2;
+    rr(cx - 14, cy - 14, 28, 11, 4); g.stroke();
+    // 天线尖端（青色）
+    g.fillStyle = COLOR_PLAYER;
+    g.beginPath(); g.arc(cx, cy - 30.4, 4.2, 0, Math.PI * 2); g.fill();
+    g.strokeStyle = COLOR_OUTLINE; g.lineWidth = 2.4;
+    g.beginPath(); g.arc(cx, cy - 30.4, 4.2, 0, Math.PI * 2); g.stroke();
+    return c;
+  }
 
-    // 2~3 帧浮动动画：上下浮动 + 呼吸缩放
+  // ===== 程序绘制：玩家 PETRI-07（预渲染精灵版）=====
+  function drawPlayer(x, y, t, alpha) {
+    const half = player.size / 2;
+
+    // 上下浮动 + 呼吸缩放（动态）
     const floatOffset = Math.sin(t * 3.2) * 2.2;
     const breathe = 1 + Math.sin(t * 3.2 + Math.PI / 2) * 0.045;
 
     ctx.save();
-    ctx.globalAlpha = alpha;
-    ctx.translate(x, y + floatOffset);
-    ctx.scale(breathe, breathe);
-    ctx.translate(-x, -(y + floatOffset));
-
     // 地面投影（增强浮动感）
     ctx.globalAlpha = alpha * 0.25;
     ctx.fillStyle = COLOR_OUTLINE;
     ctx.beginPath();
     ctx.ellipse(x, y + half + 3.5, half * 0.8, half * 0.28, 0, 0, Math.PI * 2);
     ctx.fill();
+
     ctx.globalAlpha = alpha;
+    ctx.translate(x, y + floatOffset);
+    ctx.scale(breathe, breathe);
+    ctx.drawImage(playerSprite, -32, -32, 64, 64);
 
-    const cx = x;
-    const cy = y;
-
-    // —— 深紫粗描边底（先画一圈放大的轮廓）——
-    ctx.strokeStyle = COLOR_OUTLINE;
-    ctx.lineWidth = 3.2;
-    ctx.lineJoin = 'round';
-
-    // 身体：圆角矩形主体
-    roundRect(cx - half + 2.5, cy - half + 2.5, s - 5, s - 6, 5);
-    ctx.stroke();
-
-    // 天线
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - half + 2.5);
-    ctx.lineTo(cx, cy - half - 2.5);
-    ctx.stroke();
-
-    // 两侧小臂
-    ctx.beginPath();
-    ctx.moveTo(cx - half + 2.5, cy + 1);
-    ctx.lineTo(cx - half - 1.5, cy + 1);
-    ctx.moveTo(cx + half - 2.5, cy + 1);
-    ctx.lineTo(cx + half + 1.5, cy + 1);
-    ctx.stroke();
-
-    // —— 白色主体 ——
-    ctx.fillStyle = COLOR_WHITE;
-    roundRect(cx - half + 2.5, cy - half + 2.5, s - 5, s - 6, 5);
-    ctx.fill();
-
-    // 头顶盖（略深一点的白，带描边）
-    ctx.strokeStyle = COLOR_OUTLINE;
-    ctx.lineWidth = 1.6;
-    roundRect(cx - half + 5, cy - half + 5, s - 10, 5.5, 2);
-    ctx.stroke();
-
-    // 手臂
-    ctx.beginPath();
-    ctx.moveTo(cx - half + 2.5, cy + 1);
-    ctx.lineTo(cx - half - 1.5, cy + 1);
-    ctx.moveTo(cx + half - 2.5, cy + 1);
-    ctx.lineTo(cx + half + 1.5, cy + 1);
-    ctx.stroke();
-
-    // 天线尖端（青色）
-    ctx.fillStyle = COLOR_PLAYER;
-    ctx.beginPath();
-    ctx.arc(cx, cy - half - 3.2, 2.1, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = COLOR_OUTLINE;
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-
-    // —— 青色核心灯 ——
+    // —— 青色核心灯（脉冲，动态绘制）——
     const pulse = 0.82 + Math.sin(t * 5.0) * 0.18;
     ctx.globalAlpha = alpha * pulse;
     ctx.fillStyle = COLOR_PLAYER;
     ctx.beginPath();
-    ctx.arc(cx, cy + 1.5, 3.6, 0, Math.PI * 2);
+    ctx.arc(0, 1.5, 3.6, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = COLOR_OUTLINE;
     ctx.lineWidth = 1.6;
     ctx.beginPath();
-    ctx.arc(cx, cy + 1.5, 3.6, 0, Math.PI * 2);
+    ctx.arc(0, 1.5, 3.6, 0, Math.PI * 2);
     ctx.stroke();
 
     // 核心高光
     ctx.fillStyle = COLOR_WHITE;
     ctx.beginPath();
-    ctx.arc(cx - 1.1, cy + 0.3, 1.1, 0, Math.PI * 2);
+    ctx.arc(-1.1, 0.3, 1.1, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
@@ -377,38 +410,14 @@
     ctx.closePath();
   }
 
-  // ===== 程序绘制：感染细胞敌人 =====
+  // ===== 程序绘制：感染细胞敌人（预渲染精灵版，每帧只做 drawImage + 蠕动缩放）=====
   function drawEnemy(e, t) {
-    const r = ENEMY_SIZE / 2;
     const wob = 1 + Math.sin(t * 4.5 * e.wobble + e.seed) * 0.09;
-
+    const half = 24; // 精灵对应 48 逻辑像素
     ctx.save();
     ctx.translate(e.x, e.y);
     ctx.scale(wob, wob);
-    ctx.translate(-e.x, -e.y);
-
-    // 深紫描边：先画大一圈的轮廓
-    ctx.fillStyle = COLOR_OUTLINE;
-    blobPath(e.x, e.y, r + 2.2, e.seed, 1.0);
-    ctx.fill();
-
-    // 橙色主体
-    ctx.fillStyle = COLOR_ENEMY;
-    blobPath(e.x, e.y, r, e.seed, 0.0);
-    ctx.fill();
-
-    // 内部暗核 + 高光
-    ctx.fillStyle = COLOR_OUTLINE;
-    ctx.globalAlpha = 0.55;
-    ctx.beginPath();
-    ctx.arc(e.x - r * 0.18, e.y + r * 0.2, r * 0.3, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = COLOR_WHITE;
-    ctx.beginPath();
-    ctx.arc(e.x - r * 0.34, e.y - r * 0.36, r * 0.22, 0, Math.PI * 2);
-    ctx.fill();
-
+    ctx.drawImage(e.sprite, -half, -half, half * 2, half * 2);
     ctx.restore();
   }
 
@@ -565,11 +574,11 @@
 
   function draw(t) {
     // 背景
-    ctx.fillStyle = COLOR_BG;
-    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
-
-    // 背景培养皿网格纹理（轻微）
-    drawDishBackground(t);
+    // 背景：烘焙好的离屏画布，每帧一次 blit
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (bgCanvas) ctx.drawImage(bgCanvas, 0, 0);
+    ctx.restore();
 
     // 敌人
     for (let i = 0; i < enemies.length; i++) {
@@ -592,39 +601,49 @@
   let lastDt = 0;
   function dtForStick() { return lastDt; }
 
-  // 培养皿背景：网格 + 缓慢光晕
-  function drawDishBackground(t) {
-    ctx.save();
+  // 培养皿背景：离屏烘焙一次，resize 时重烘。
+  // 之前每帧全屏 fillRect + 26 条网格线 + 全屏径向渐变，是手机端掉帧/输入延迟的主因。
+  // 光晕呼吸动画暂 bake 为静态，留给 P4 美术打磨再做动态版。
+  let bgCanvas = null;
+  function renderBackground() {
+    bgCanvas = document.createElement('canvas');
+    bgCanvas.width = Math.max(1, canvas.width);
+    bgCanvas.height = Math.max(1, canvas.height);
+    const b = bgCanvas.getContext('2d');
+    // 整张先铺底色（含 contain 黑边区）
+    b.fillStyle = COLOR_BG;
+    b.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    b.setTransform(scale, 0, 0, scale, offX, offY);
     // 网格
-    ctx.globalAlpha = 0.05;
-    ctx.strokeStyle = COLOR_PLAYER;
-    ctx.lineWidth = 1;
+    b.globalAlpha = 0.05;
+    b.strokeStyle = COLOR_PLAYER;
+    b.lineWidth = 1;
     const grid = 40;
-    ctx.beginPath();
+    b.beginPath();
     for (let x = 0; x <= LOGICAL_W; x += grid) {
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, LOGICAL_H);
+      b.moveTo(x, 0);
+      b.lineTo(x, LOGICAL_H);
     }
     for (let y = 0; y <= LOGICAL_H; y += grid) {
-      ctx.moveTo(0, y);
-      ctx.lineTo(LOGICAL_W, y);
+      b.moveTo(0, y);
+      b.lineTo(LOGICAL_W, y);
     }
-    ctx.stroke();
-
-    // 中心微弱光晕，随时间呼吸
-    ctx.globalAlpha = 0.05 + Math.sin(t * 1.2) * 0.02;
-    const grad = ctx.createRadialGradient(
+    b.stroke();
+    // 中心微弱光晕
+    b.globalAlpha = 0.05;
+    const grad = b.createRadialGradient(
       LOGICAL_W / 2, LOGICAL_H / 2, 20,
       LOGICAL_W / 2, LOGICAL_H / 2, LOGICAL_H * 0.7
     );
     grad.addColorStop(0, COLOR_PLAYER);
     grad.addColorStop(1, 'rgba(56,232,224,0)');
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
-    ctx.restore();
+    b.fillStyle = grad;
+    b.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+    b.globalAlpha = 1;
   }
 
   // ===== 启动 =====
+  playerSprite = makePlayerSprite();
   resize();
   requestAnimationFrame(function (now) {
     lastTime = now;
