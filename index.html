@@ -106,6 +106,27 @@
   const ARC_SEGMENTS = 3;      // 最大折线段数（玩家 → 命中1 → 命中2 → 命中3）
   const ARC_JITTER = 0.34;     // midpoint 抖动幅度系数
 
+  // ===== 构筑系统参数（Prototype 2）=====
+  const MAX_SLOTS = 4;              // 技能槽数量
+  const SKILL_LV_CAP = 5;           // 单技能等级上限
+  const SKILL_ORDER = ['needle', 'blade', 'arc']; // 技能遍历顺序（发牌/槽位渲染用）
+  const XP_STEP = 5;                // 升到 n+1 级需 n*XP_STEP 点经验
+  const DMG_PER_LV = 0.25;          // 每级伤害加成（+25%/级）
+  const HP_CARD_GAIN = 30;          // 扩容卡的生命上限增量
+  const SPEED_CARD_MULT = 1.15;     // 鞭毛强化的移速乘数
+  const BRANCH_SAMPLE_COST = 10;    // 分支进化消耗样本
+  const BRANCH_MIN_LV = 3;          // 分支进化所需最低等级
+  const RAIN_SPREAD = Math.PI / 12; // 针雨协议扇形半角（±15°）
+  const EXEC_STACK_MAX = 5;         // 处决针第 N 发触发
+  const EXEC_MULT = 2.5;            // 处决针触发倍率（第5发 +150%）
+  const SAMPLE_POOL = 40;           // 样本点对象池容量（固定，不扩容）
+  const SAMPLE_PICK_R = 24;         // 样本拾取半径
+  const SAMPLE_R = 4;               // 样本绘制半径
+  const CARD_W = 300;               // 三选一卡片宽
+  const CARD_H = 92;                // 三选一卡片高
+  const CARD_GAP = 16;              // 卡片间距
+  const SLOT_UI_SIZE = 30;          // 技能槽格子边长
+
   // 粒子系统
   const PARTICLE_POOL = 200;   // 粒子对象池容量（固定，不扩容）
 
@@ -174,6 +195,29 @@
     deadT: 0       // 死亡复活倒计时（P1 极简：1.2s 后原地满血复活，不做结算）
   };
   const ENEMY_TOUCH_DMG = 8; // 怪接触伤害
+
+  // ===== 构筑状态（Prototype 2）=====
+  // branch: null | 'rain' | 'execute'（不可逆，只能写一次）
+  const skills = {
+    needle: { owned: true,  lv: 1, branch: null },
+    blade:  { owned: false, lv: 0, branch: null },
+    arc:    { owned: false, lv: 0, branch: null }
+  };
+  const SKILL_META = {
+    needle: { name: '脉冲针', short: '针', color: '#38E8E0' },
+    blade:  { name: '离心刃', short: '刃', color: '#7EB6FF' },
+    arc:    { name: '培养电弧', short: '弧', color: '#B98CFF' }
+  };
+  let playerLevel = 1;
+  let playerXp = 0;
+  let xpNext = XP_STEP;  // 升到 n+1 级需 n*XP_STEP 点经验
+  let pendingLevels = 0; // 待结算升级数（>0 且能开 UI 时弹三选一）
+  let samples = 0;        // SAMPLE 计数
+  let uiOpen = false;     // 三选一 UI 打开：update 冻结、摇杆输入忽略
+  let branchMode = false; // 分支子选择中（两张分支卡 + 返回）
+  let speedMult = 1;      // 移速乘区（补弱点"移速+15%"用）
+  let execTarget = null;  // 处决针：当前叠层目标
+  let execCount = 0;      // 处决针：已叠层数
 
   // ===== 敌人集合 =====
   // 场上恒定 20 只：数组只在初始化时 push 一次，之后死亡/重生只改字段，不增删
@@ -307,8 +351,9 @@
     g.fillRect(0, 0, S, S);
     return c;
   }
-  const PARTICLE_SPRITES = [makeDotSprite(COLOR_WHITE), makeDotSprite(COLOR_PLAYER), makeDotSprite(COLOR_ENEMY)];
-  const P_WHITE = 0, P_CYAN = 1, P_ORANGE = 2;
+  const COLOR_SAMPLE = '#5BE08C'; // SAMPLE 样本绿
+  const PARTICLE_SPRITES = [makeDotSprite(COLOR_WHITE), makeDotSprite(COLOR_PLAYER), makeDotSprite(COLOR_ENEMY), makeDotSprite(COLOR_SAMPLE)];
+  const P_WHITE = 0, P_CYAN = 1, P_ORANGE = 2, P_GREEN = 3;
 
   // —— 粒子对象池（固定 200，life <= 0 视为空槽）——
   const particles = [];
@@ -450,6 +495,11 @@
       hitStop = HIT_STOP;
       // 死亡震屏：叠加但封顶 7px，连杀不糊
       shake = Math.min(shake + 2.5, 7);
+      // P2：死亡给构筑资源（经验 + 样本）
+      gainXp(1);
+      dropSample(e.x, e.y);
+      // 处决针：目标死亡清零叠层（换目标/死亡清零规则的一部分）
+      if (e === execTarget) { execTarget = null; execCount = 0; }
     }
   }
 
@@ -513,7 +563,8 @@
   let needleCursor = 0;
   let needleCd = NEEDLE_CD;
 
-  function fireNeedle(target) {
+  // 分配一个池槽位并沿角度 a 发射（rain 分支会一次占用 3 个槽位）
+  function spawnNeedleAt(a) {
     let slot = null;
     let idx = 0;
     for (let i = 0; i < NEEDLE_POOL; i++) {
@@ -523,7 +574,6 @@
     if (!slot) return; // 池满（本不该发生）直接放弃这次发射
     needleCursor = (idx + 1) % NEEDLE_POOL;
 
-    const a = Math.atan2(target.y - player.y, target.x - player.x);
     slot.active = true;
     slot.x = player.x + Math.cos(a) * 12; // 从体表射出，避免贴脸立刻命中
     slot.y = player.y + Math.sin(a) * 12;
@@ -533,10 +583,36 @@
     slot.life = NEEDLE_FUSE;
   }
 
+  function fireNeedle(target) {
+    const a = Math.atan2(target.y - player.y, target.x - player.x);
+    // 分支"针雨协议"：扇形 3 发，单发伤害不变
+    if (skills.needle.branch === 'rain') {
+      spawnNeedleAt(a - RAIN_SPREAD);
+      spawnNeedleAt(a);
+      spawnNeedleAt(a + RAIN_SPREAD);
+    } else {
+      spawnNeedleAt(a);
+    }
+  }
+
+  // 分支"处决针"：连续命中同一目标叠层，第 5 发伤害 ×2.5（+150%），随后清零重新计
+  function needleHitDamage(e) {
+    const base = needleDmg();
+    if (skills.needle.branch !== 'execute') return base;
+    if (e === execTarget) execCount++;
+    else { execTarget = e; execCount = 1; }
+    if (execCount >= EXEC_STACK_MAX) {
+      execCount = 0;
+      return base * EXEC_MULT;
+    }
+    return base;
+  }
+
   const NEEDLE_HIT_R = ENEMY_R + NEEDLE_R;
   const NEEDLE_HIT_R2 = NEEDLE_HIT_R * NEEDLE_HIT_R;
 
   function updateNeedles(dt) {
+    if (!skills.needle.owned) return;
     needleCd -= dt;
     if (needleCd <= 0) {
       const target = nearestEnemy(player.x, player.y, NEEDLE_RANGE, null, 0);
@@ -558,7 +634,7 @@
         if (!e.alive) continue;
         const dx = e.x - p.x, dy = e.y - p.y;
         if (dx * dx + dy * dy <= NEEDLE_HIT_R2) {
-          hitEnemy(e, NEEDLE_DMG);
+          hitEnemy(e, needleHitDamage(e));
           spawnSparks(p.x, p.y);
           p.active = false; // 命中即回收
           break;
@@ -574,6 +650,7 @@
   }
 
   function drawNeedles() {
+    if (!skills.needle.owned) return;
     for (let i = 0; i < NEEDLE_POOL; i++) {
       const p = needles[i];
       if (!p.active) continue;
@@ -623,6 +700,7 @@
   const BLADE_HIT_R2 = BLADE_HIT_R * BLADE_HIT_R;
 
   function updateBlades(dt) {
+    if (!skills.blade.owned) return;
     bladeAngle += BLADE_OMEGA * dt;
     if (bladeAngle >= Math.PI * 2) bladeAngle -= Math.PI * 2;
     for (let b = 0; b < BLADE_COUNT; b++) {
@@ -639,7 +717,7 @@
         const dx = e.x - bladeX[b], dy = e.y - bladeY[b];
         if (dx * dx + dy * dy <= BLADE_HIT_R2) {
           e.bladeCd = BLADE_CD;
-          hitEnemy(e, BLADE_DMG);
+          hitEnemy(e, bladeDmg());
           spawnSparks(e.x, e.y);
           break;
         }
@@ -648,6 +726,7 @@
   }
 
   function drawBlades() {
+    if (!skills.blade.owned) return;
     for (let b = 0; b < BLADE_COUNT; b++) {
       ctx.save();
       ctx.translate(bladeX[b], bladeY[b]);
@@ -684,7 +763,7 @@
     let nodeCount = 0;
     arcNodeX[0] = player.x; arcNodeY[0] = player.y; nodeCount = 1;
 
-    let dmg = ARC_DMG;
+    let dmg = arcDmg();
     let fromX = first.x, fromY = first.y;
     arcNodeX[nodeCount] = fromX; arcNodeY[nodeCount] = fromY; nodeCount++;
     hitEnemy(first, dmg);
@@ -724,6 +803,7 @@
   }
 
   function updateArcs(dt) {
+    if (!skills.arc.owned) return;
     arcCd -= dt;
     if (arcCd <= 0) {
       const target = nearestEnemy(player.x, player.y, ARC_RANGE, null, 0);
@@ -744,6 +824,7 @@
   }
 
   function drawArcs() {
+    if (!skills.arc.owned) return;
     for (let i = 0; i < ARC_POOL; i++) {
       const a = arcs[i];
       if (a.life <= 0) continue;
@@ -764,6 +845,358 @@
       ctx.restore();
     }
     ctx.globalAlpha = 1;
+  }
+
+  // ============================================================
+  // 构筑系统（Prototype 2）
+  // 经验/升级 → 三选一 → 分支进化。核心约束：每次发牌必须覆盖
+  // 三类决策——①强化当前构筑 ②补弱点 ③改变路线。
+  // ============================================================
+
+  // ===== 伤害按等级缩放 =====
+  // 1 + 0.25*(lv-1)：Lv1 基准，每级 +25%，Lv5 为基准的 2 倍
+  function needleDmg() { return NEEDLE_DMG * (1 + 0.25 * (skills.needle.lv - 1)); }
+  function bladeDmg() { return BLADE_DMG * (1 + 0.25 * (skills.blade.lv - 1)); }
+  function arcDmg() { return ARC_DMG * (1 + 0.25 * (skills.arc.lv - 1)); }
+
+  // ===== 经验与升级 =====
+  function gainXp(n) {
+    playerXp += n;
+    while (playerXp >= xpNext) {
+      playerXp -= xpNext;
+      playerLevel++;
+      xpNext = playerLevel * XP_STEP;
+      pendingLevels++;
+    }
+  }
+
+  function openLevelUp() {
+    uiOpen = true;
+    branchMode = false;
+    // 摇杆清零：否则松开事件晚到会让角色在选卡期间继续走
+    stick.x = 0;
+    stick.y = 0;
+    stick.active = false;
+    stick.pointerId = null;
+    dealCards();
+  }
+
+  // ===== SAMPLE（绿色样本点）=====
+  const samples_pool = [];
+  for (let i = 0; i < SAMPLE_POOL; i++) samples_pool.push({ active: false, x: 0, y: 0 });
+
+  function dropSample(x, y) {
+    for (let i = 0; i < SAMPLE_POOL; i++) {
+      const s = samples_pool[i];
+      if (!s.active) { s.active = true; s.x = x; s.y = y; return; }
+    }
+    // 池满直接丢弃，绝不扩容
+  }
+
+  const SAMPLE_PICK_R2 = SAMPLE_PICK_R * SAMPLE_PICK_R;
+  function updateSamples() {
+    for (let i = 0; i < SAMPLE_POOL; i++) {
+      const s = samples_pool[i];
+      if (!s.active) continue;
+      const dx = s.x - player.x, dy = s.y - player.y;
+      if (dx * dx + dy * dy <= SAMPLE_PICK_R2) {
+        s.active = false;
+        samples++;
+        // 复用火花池做一小簇绿色反馈
+        for (let k = 0; k < 3; k++) {
+          const a = Math.random() * Math.PI * 2;
+          spawnParticle(
+            s.x, s.y,
+            Math.cos(a) * 50, Math.sin(a) * 50,
+            0.18, 2.5,
+            PARTICLE_SPRITES[P_GREEN]
+          );
+        }
+      }
+    }
+  }
+
+  function drawSamples() {
+    ctx.save();
+    ctx.fillStyle = COLOR_SAMPLE;
+    for (let i = 0; i < SAMPLE_POOL; i++) {
+      const s = samples_pool[i];
+      if (!s.active) continue;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, SAMPLE_R, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // ===== 发牌：每次恰好 3 张，类别齐全 =====
+  // 卡片：{ kind, cat, title, desc }
+  let cards = [];
+  let cardRects = []; // {x,y,w,h,card}，供点击命中判定
+
+  function upgradeableSkills() {
+    const list = [];
+    for (let i = 0; i < SKILL_ORDER.length; i++) {
+      const k = SKILL_ORDER[i];
+      const s = skills[k];
+      if (s.owned && s.lv < SKILL_LV_CAP) list.push(k);
+    }
+    return list;
+  }
+
+  function slotsUsed() {
+    let n = 0;
+    for (let i = 0; i < SKILL_ORDER.length; i++) if (skills[SKILL_ORDER[i]].owned) n++;
+    return n;
+  }
+
+  function lockedSkills() {
+    const list = [];
+    for (let i = 0; i < SKILL_ORDER.length; i++) {
+      if (!skills[SKILL_ORDER[i]].owned) list.push(SKILL_ORDER[i]);
+    }
+    return list;
+  }
+
+  function maxhpCard() {
+    return { kind: 'maxhp', cat: '补弱点', title: '培养皿扩容', desc: '生命上限 +' + HP_CARD_GAIN + '（并回复' + HP_CARD_GAIN + '）' };
+  }
+
+  function dealCards() {
+    branchMode = false;
+    cards = [];
+
+    // 卡1 强化当前构筑：随机一个未满级技能；全满级则转为"过载充能"（类别不变，保证三类齐全）
+    const ups = upgradeableSkills();
+    if (ups.length > 0) {
+      const k = ups[(Math.random() * ups.length) | 0];
+      cards.push({
+        kind: 'upgrade',
+        cat: '强化当前构筑',
+        skill: k,
+        title: SKILL_META[k].name + ' Lv' + skills[k].lv + '→Lv' + (skills[k].lv + 1),
+        desc: '伤害 +25%'
+      });
+    } else {
+      cards.push({ kind: 'maxhp', cat: '强化当前构筑', title: '过载充能', desc: '技能已满级，转化为生命上限+30（并回复30）' });
+    }
+
+    // 卡2 补弱点：扩容 / 移速 二选一
+    cards.push(Math.random() < 0.5
+      ? maxhpCard()
+      : { kind: 'speed', cat: '补弱点', title: '鞭毛强化', desc: '移速 +15%' });
+
+    // 卡3 改变路线：分支进化 > 新技能 > 保底扩容
+    if (skills.needle.lv >= BRANCH_MIN_LV && !skills.needle.branch && samples >= BRANCH_SAMPLE_COST) {
+      cards.push({
+        kind: 'branch',
+        cat: '改变路线',
+        title: '🧬 分支进化',
+        desc: '耗' + BRANCH_SAMPLE_COST + '样本，不可逆二选一'
+      });
+    } else {
+      const locked = lockedSkills();
+      if (slotsUsed() < MAX_SLOTS && locked.length > 0) {
+        const k = locked[(Math.random() * locked.length) | 0];
+        cards.push({
+          kind: 'newskill',
+          cat: '改变路线',
+          skill: k,
+          title: '新技能：' + SKILL_META[k].name,
+          desc: '占据1技能槽，' + (k === 'blade' ? '环绕近战' : '弹射连锁')
+        });
+      } else {
+        // 保底：无新路线可选时转为"战术重整"（类别不变，保证三类齐全）
+        cards.push({ kind: 'maxhp', cat: '改变路线', title: '战术重整', desc: '暂无新路线，转化为生命上限+30（并回复30）' });
+      }
+    }
+
+    layoutCards();
+  }
+
+  function dealBranchCards() {
+    branchMode = true;
+    cards = [
+      { kind: 'branchpick', cat: '分支进化', branch: 'rain', title: '针雨协议', desc: '每次射击变扇形3发（±15°），单发伤害不变' },
+      { kind: 'branchpick', cat: '分支进化', branch: 'execute', title: '处决针', desc: '连续命中同一目标叠层，第5发+150%，换目标/目标死亡清零' },
+      { kind: 'back', cat: '返回', title: '再想想', desc: '保留三选一，不消耗样本' }
+    ];
+    layoutCards();
+  }
+
+  // 卡片纵向排列：逻辑坐标，标题在上、返回键位给分支模式留第三行
+  function layoutCards() {
+    const totalH = cards.length * CARD_H + (cards.length - 1) * CARD_GAP;
+    const startY = 150 + (LOGICAL_H - 150 - totalH) / 2;
+    cardRects.length = 0;
+    for (let i = 0; i < cards.length; i++) {
+      cardRects.push({
+        x: (LOGICAL_W - CARD_W) / 2,
+        y: startY + i * (CARD_H + CARD_GAP),
+        w: CARD_W,
+        h: CARD_H,
+        card: cards[i]
+      });
+    }
+  }
+
+  function applyCard(card) {
+    switch (card.kind) {
+      case 'upgrade': {
+        const s = skills[card.skill];
+        if (s && s.lv < SKILL_LV_CAP) s.lv++;
+        break;
+      }
+      case 'maxhp':
+        player.maxHp += HP_CARD_GAIN;
+        player.hp = Math.min(player.maxHp, player.hp + HP_CARD_GAIN);
+        break;
+      case 'speed':
+        speedMult *= SPEED_CARD_MULT;
+        break;
+      case 'newskill': {
+        const s = skills[card.skill];
+        s.owned = true;
+        s.lv = 1;
+        break;
+      }
+      case 'branchpick':
+        // 不可逆：branch 只在为空时写入，重复选择无效
+        if (!skills.needle.branch) {
+          samples -= BRANCH_SAMPLE_COST;
+          skills.needle.branch = card.branch;
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  function handleUiTap(lx, ly) {
+    for (let i = 0; i < cardRects.length; i++) {
+      const r = cardRects[i];
+      if (lx < r.x || lx > r.x + r.w || ly < r.y || ly > r.y + r.h) continue;
+      const card = r.card;
+      if (card.kind === 'branch') { dealBranchCards(); return; }
+      if (card.kind === 'back') { dealCards(); return; }
+      applyCard(card);
+      pendingLevels--;
+      if (pendingLevels > 0) dealCards(); // 连续升级：直接换牌，不关 UI
+      else uiOpen = false;
+      return;
+    }
+  }
+
+  // ===== 三选一 UI 绘制（最上层）=====
+  function drawWrapText(text, x, y, maxW, lh) {
+    let line = '';
+    let yy = y;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      const test = line + ch;
+      if (ctx.measureText(test).width > maxW && line.length > 0) {
+        ctx.fillText(line, x, yy);
+        line = ch;
+        yy += lh;
+      } else {
+        line = test;
+      }
+    }
+    if (line.length > 0) ctx.fillText(line, x, yy);
+  }
+
+  function drawLevelUpUI() {
+    if (!uiOpen) return;
+    ctx.save();
+    // 半透明遮罩
+    ctx.fillStyle = 'rgba(7,18,29,0.72)';
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    // 标题
+    ctx.fillStyle = COLOR_WHITE;
+    ctx.font = 'bold 17px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(branchMode ? '分支进化 · 不可逆' : 'Lv.' + playerLevel + ' 升级！三选一', LOGICAL_W / 2, 132);
+
+    for (let i = 0; i < cardRects.length; i++) {
+      const r = cardRects[i];
+      const card = r.card;
+      // 卡面
+      ctx.fillStyle = card.kind === 'back' ? 'rgba(24,20,32,0.9)' : 'rgba(14,34,48,0.95)';
+      roundRect(r.x, r.y, r.w, r.h, 10);
+      ctx.fill();
+      ctx.strokeStyle = card.kind === 'back' ? 'rgba(243,247,250,0.25)' : COLOR_PLAYER;
+      ctx.lineWidth = card.kind === 'branch' ? 2.4 : 1.4;
+      roundRect(r.x, r.y, r.w, r.h, 10);
+      ctx.stroke();
+
+      // 类别小标签
+      ctx.textAlign = 'left';
+      ctx.font = 'bold 10px ui-monospace, monospace';
+      ctx.fillStyle = COLOR_SAMPLE;
+      ctx.fillText(card.cat, r.x + 12, r.y + 18);
+
+      // 技能名（强化卡按技能色）
+      ctx.font = 'bold 16px ui-monospace, monospace';
+      ctx.fillStyle = (card.skill && SKILL_META[card.skill]) ? SKILL_META[card.skill].color : COLOR_WHITE;
+      ctx.fillText(card.title, r.x + 12, r.y + 42);
+
+      // 说明（长文本折行）
+      ctx.font = '11px ui-monospace, monospace';
+      ctx.fillStyle = 'rgba(243,247,250,0.75)';
+      drawWrapText(card.desc, r.x + 12, r.y + 62, r.w - 24, 14);
+    }
+    ctx.restore();
+  }
+
+  // ===== 槽位 UI（左上角 4 格）=====
+  function drawSlots() {
+    const x0 = 8, y0 = 8, gap = 4;
+    ctx.save();
+    ctx.textAlign = 'center';
+    for (let i = 0; i < MAX_SLOTS; i++) {
+      const x = x0 + i * (SLOT_UI_SIZE + gap);
+      const key = SKILL_ORDER[i];
+      const s = key ? skills[key] : null;
+      if (s && s.owned) {
+        ctx.fillStyle = 'rgba(10,22,32,0.7)';
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
+        ctx.fill();
+        ctx.fillStyle = SKILL_META[key].color;
+        ctx.globalAlpha = 0.9;
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = COLOR_OUTLINE;
+        ctx.font = 'bold 13px ui-monospace, monospace';
+        ctx.fillText(SKILL_META[key].short, x + SLOT_UI_SIZE / 2, y0 + 14);
+        ctx.fillStyle = COLOR_WHITE;
+        ctx.font = 'bold 8px ui-monospace, monospace';
+        ctx.fillText('Lv' + s.lv, x + SLOT_UI_SIZE / 2, y0 + 26);
+        // 分支进化标记
+        if (s.branch) {
+          ctx.fillStyle = COLOR_SAMPLE;
+          ctx.font = 'bold 9px ui-monospace, monospace';
+          ctx.fillText('*', x + SLOT_UI_SIZE - 5, y0 + 10);
+        }
+      } else {
+        ctx.strokeStyle = 'rgba(243,247,250,0.22)';
+        ctx.lineWidth = 1.2;
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+
+  // ===== 样本计数（右上角）=====
+  function drawSampleCount() {
+    ctx.save();
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 12px ui-monospace, monospace';
+    ctx.fillStyle = COLOR_SAMPLE;
+    ctx.fillText('样本 ×' + samples, LOGICAL_W - 10, 22);
+    ctx.restore();
   }
 
   // ===== 摇杆状态 =====
@@ -846,6 +1279,8 @@
   canvas.addEventListener('mousedown', function (e) {
     e.preventDefault();
     const p = toLogical(e.clientX, e.clientY);
+    // 三选一期间：点卡而不是摇杆
+    if (uiOpen) { handleUiTap(p.x, p.y); return; }
     stickDown({ id: 'mouse', x: p.x, y: p.y });
   });
   window.addEventListener('mousemove', function (e) {
@@ -868,11 +1303,13 @@
     const t = e.changedTouches[0];
     if (!t) return;
     const p = toLogical(t.clientX, t.clientY);
+    if (uiOpen) { handleUiTap(p.x, p.y); return; }
     stickDown({ id: t.identifier, x: p.x, y: p.y });
   }, { passive: false });
 
   canvas.addEventListener('touchmove', function (e) {
     e.preventDefault();
+    if (uiOpen) return; // 选卡时不响应拖动，避免点卡变成移动
     // 取合并触摸事件的最新位置，减少输入延迟
     const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || e.changedTouches;
     for (let i = 0; i < list.length; i++) {
@@ -1147,12 +1584,15 @@
   }
 
   function update(dt) {
-    // —— 玩家移动（摇杆归一化方向 × 移速）；死亡复活读秒时不动 ——
+    // 三选一期间冻结整个逻辑更新（战场静止，避免边选卡边挨打）
+    if (uiOpen) return;
+
+    // —— 玩家移动（摇杆归一化方向 × 移速 × 构筑移速乘区）；死亡复活读秒时不动 ——
     if (player.deadT <= 0) {
       const moveLen = Math.hypot(stick.x, stick.y);
       if (moveLen > 0.001) {
-        player.x += stick.x * PLAYER_SPEED * dt;
-        player.y += stick.y * PLAYER_SPEED * dt;
+        player.x += stick.x * PLAYER_SPEED * speedMult * dt;
+        player.y += stick.y * PLAYER_SPEED * speedMult * dt;
       }
     } else {
       // 死亡：1.2s 后原地满血复活，敌人回边缘（P1 极简，不做结算）
@@ -1250,6 +1690,10 @@
     updateArcs(dt);
     updateParticles(dt);
     updateDmgNums(dt);
+    updateSamples();
+
+    // —— 升级结算：有待用等级且玩家活着且 UI 没开 → 弹三选一 ——
+    if (pendingLevels > 0 && player.deadT <= 0 && !uiOpen) openLevelUp();
   }
 
   function draw(t) {
@@ -1290,12 +1734,19 @@
     // 粒子（爆裂/火花在最上层）
     drawParticles();
 
+    // SAMPLE 样本点（战场层，与敌人同级）
+    drawSamples();
+
     // 伤害数字（粒子之上、摇杆之下）
     drawDmgNums();
 
     // 摇杆（UI 层：先清掉震屏偏移，摇杆不抖）
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     drawStick(dtForStick());
+
+    // 构筑 HUD：左上槽位 + 右上样本计数
+    drawSlots();
+    drawSampleCount();
 
     // 血条（顶部居中）
     const hbW = 120, hbH = 8, hbX = (LOGICAL_W - hbW) / 2, hbY = 10;
@@ -1323,6 +1774,9 @@
       ctx.fillText('信号中断…', LOGICAL_W / 2, LOGICAL_H / 2 - 40);
       ctx.restore();
     }
+
+    // 三选一 UI（最上层，压住一切）
+    drawLevelUpUI();
   }
 
   // drawStick 需要 dt 做回中插值，这里保存最近一帧的 dt
