@@ -58,16 +58,15 @@
   const COLOR_WHITE = '#F3F7FA';   // 系统白
 
   // ===== 玩法参数 =====
-  const PLAYER_SPEED = 110;   // 玩家移速 px/s
+  const PLAYER_SPEED = 125;   // 玩家移速 px/s（跟手性优先于纸面数值）
   const ENEMY_SPEED = 110;    // 敌人移速 px/s
   const ENEMY_COUNT = 20;     // 敌人数量
   const ENEMY_SIZE = 16;      // 敌人逻辑尺寸
   const ENEMY_SEPARATION = 26;// 敌人分离强度系数
   const INVOKED_IFRAME = 0.45; // 无敌帧时长（秒）
 
-  // ===== 摇杆参数 =====
-  const STICK_VISUAL_RADIUS = 44; // 视觉半径
-  const STICK_RESPONSE_RADIUS = 70;// 实际响应半径（归一化用）
+  // ===== 摇杆参数（视觉与响应统一半径，避免"手在动、杆不动"的脱节感）=====
+  const STICK_RADIUS = 50; // 手指拖到 50px 即满速
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
@@ -178,9 +177,8 @@
     let dy = p.y - stick.originY;
     const len = Math.hypot(dx, dy);
 
-    // 视觉半径内跟手；超过响应半径则钳制并归一化
-    const visualLimit = STICK_VISUAL_RADIUS;
-    const k = len > visualLimit ? visualLimit / len : 1;
+    // 摇杆头 1:1 跟手（钳制在统一半径内）；力度按同一半径归一化
+    const k = len > STICK_RADIUS ? STICK_RADIUS / len : 1;
     stick.knobX = stick.originX + dx * k;
     stick.knobY = stick.originY + dy * k;
 
@@ -189,7 +187,7 @@
     if (len > DEAD) {
       const nx = dx / len;
       const ny = dy / len;
-      const strength = Math.min(1, (len - DEAD) / (STICK_RESPONSE_RADIUS - DEAD));
+      const strength = Math.min(1, (len - DEAD) / (STICK_RADIUS - DEAD));
       stick.x = nx * strength;
       stick.y = ny * strength;
     } else {
@@ -436,7 +434,7 @@
       ctx.globalAlpha = 0.28;
       ctx.fillStyle = COLOR_WHITE;
       ctx.beginPath();
-      ctx.arc(stick.originX, stick.originY, STICK_VISUAL_RADIUS, 0, Math.PI * 2);
+      ctx.arc(stick.originX, stick.originY, STICK_RADIUS, 0, Math.PI * 2);
       ctx.fill();
 
       // 底座描边
@@ -444,7 +442,7 @@
       ctx.strokeStyle = COLOR_PLAYER;
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(stick.originX, stick.originY, STICK_VISUAL_RADIUS, 0, Math.PI * 2);
+      ctx.arc(stick.originX, stick.originY, STICK_RADIUS, 0, Math.PI * 2);
       ctx.stroke();
 
       // 摇杆头
