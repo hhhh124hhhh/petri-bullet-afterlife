@@ -26,7 +26,8 @@
     transform: translate(-50%, -50%);
     /* 让 canvas 保持 9:16 比例并尽可能铺满视口 */
     aspect-ratio: 9 / 16;
-    height: 100vh;
+    height: 100vh; /* 旧浏览器回退 */
+    height: 100dvh; /* 动态视口高度：跟随手机地址栏显隐，不用 vh 的"大视口" */
     max-width: 100vw;
     image-rendering: auto;
   }
@@ -123,8 +124,14 @@
     // DPR 上限 2：移动端 fill-rate 优先，2x 对本作像素风已足够锐利
     dpr = Math.min(window.devicePixelRatio || 1, 2);
     const rect = canvas.getBoundingClientRect();
-    const cssW = Math.max(1, Math.round(rect.width));
-    const cssH = Math.max(1, Math.round(rect.height));
+    const cssW = Math.round(rect.width);
+    const cssH = Math.round(rect.height);
+
+    // 非法尺寸拒绝：手机浏览器地址栏显隐、布局过渡时会触发瞬时极小尺寸，
+    // 直接采用会把 canvas 设成一小块且回不来。小于 200px 或不足当前 40% 则忽略。
+    if (cssW < 200 || cssH < 200) return;
+    const prevW = canvas.width / dpr, prevH = canvas.height / dpr;
+    if (prevW > 0 && (cssW < prevW * 0.4 || cssH < prevH * 0.4)) return;
 
     // 后备缓冲按 devicePixelRatio 放大
     canvas.width = Math.round(cssW * dpr);
@@ -141,11 +148,19 @@
     renderBackground(); // 尺寸变化时重烘背景
   }
 
-  window.addEventListener('resize', resize);
-  window.addEventListener('orientationchange', function () {
-    // 延迟一帧，等待布局稳定后再计算
-    setTimeout(resize, 100);
-  });
+  // 防抖：地址栏动画会连发多次 resize，150ms 内只执行最后一次
+  let resizeTimer = 0;
+  function debouncedResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function () { resizeTimer = 0; resize(); }, 150);
+  }
+
+  window.addEventListener('resize', debouncedResize);
+  window.addEventListener('orientationchange', debouncedResize);
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', debouncedResize);
+  }
+  // （orientationchange 已并入上面的 debouncedResize）
 
   // ===== 玩家状态 =====
   const player = {
