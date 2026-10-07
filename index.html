@@ -129,10 +129,12 @@
       y: y,
       vx: 0,
       vy: 0,
-      seed: Math.random() * Math.PI * 2,
+      // 包围角度均分（+微小抖动），避免纯随机导致的角度扎堆
+      seed: (i / ENEMY_COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.25,
       wobble: 0.6 + Math.random() * 0.8, // 每只细胞的蠕动相位频率
       orbitR: 30 + Math.random() * 16,   // 包围半径：瞄准玩家周围而非玩家中心，避免堆叠成一团
-      sprite: ENEMY_SPRITES[i % ENEMY_SPRITES.length] // 预渲染精灵
+      sprite: ENEMY_SPRITES[i % ENEMY_SPRITES.length], // 预渲染精灵
+      sx: 0, sy: 0 // 分离推力缓存（两阶段计算用）
     });
   }
 
@@ -546,18 +548,13 @@
     if (player.invuln > 0) player.invuln -= dt;
 
     // —— 敌人追踪：瞄准玩家周围的包围点（形成环绕，而非堆叠在玩家身上）——
+    // 分离力两阶段计算：先算完所有推力再统一施加，避免"后算的外层循环覆盖先算的结果"
+    for (let i = 0; i < enemies.length; i++) {
+      enemies[i].sx = 0;
+      enemies[i].sy = 0;
+    }
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
-      const tx = player.x + Math.cos(e.seed) * e.orbitR;
-      const ty = player.y + Math.sin(e.seed) * e.orbitR;
-      const dx = tx - e.x;
-      const dy = ty - e.y;
-      const d = Math.hypot(dx, dy) || 1;
-      // 直接朝包围点移动
-      e.vx = (dx / d) * ENEMY_SPEED;
-      e.vy = (dy / d) * ENEMY_SPEED;
-
-      // 与其他敌人的分离力，避免完全重叠（作用半径加大）
       for (let j = i + 1; j < enemies.length; j++) {
         const o = enemies[j];
         const ox = e.x - o.x;
@@ -568,13 +565,21 @@
           const push = (minDist - od) / minDist * ENEMY_SEPARATION;
           const px = (ox / od) * push;
           const py = (oy / od) * push;
-          e.vx += px;
-          e.vy += py;
-          o.vx -= px;
-          o.vy -= py;
+          e.sx += px; e.sy += py;
+          o.sx -= px; o.sy -= py;
         }
       }
-
+    }
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const tx = player.x + Math.cos(e.seed) * e.orbitR;
+      const ty = player.y + Math.sin(e.seed) * e.orbitR;
+      const dx = tx - e.x;
+      const dy = ty - e.y;
+      const d = Math.hypot(dx, dy) || 1;
+      // 朝包围点移动 + 分离推力
+      e.vx = (dx / d) * ENEMY_SPEED + e.sx;
+      e.vy = (dy / d) * ENEMY_SPEED + e.sy;
       e.x += e.vx * dt;
       e.y += e.vy * dt;
     }
