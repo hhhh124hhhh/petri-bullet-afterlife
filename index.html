@@ -58,7 +58,7 @@
   const COLOR_WHITE = '#F3F7FA';   // 系统白
 
   // ===== 玩法参数 =====
-  const PLAYER_SPEED = 125;   // 玩家移速 px/s（跟手性优先于纸面数值）
+  const PLAYER_SPEED = 150;   // 玩家移速 px/s（跟手性优先于纸面数值）
   const ENEMY_SPEED = 110;    // 敌人移速 px/s
   const ENEMY_COUNT = 20;     // 敌人数量
   const ENEMY_SIZE = 16;      // 敌人逻辑尺寸
@@ -187,7 +187,9 @@
     if (len > DEAD) {
       const nx = dx / len;
       const ny = dy / len;
-      const strength = Math.min(1, (len - DEAD) / (STICK_RADIUS - DEAD));
+      // 响应曲线：小幅度推动也给足速度（pow<1 让前段更陡），拒绝"肉"
+      const t = Math.min(1, (len - DEAD) / (STICK_RADIUS - DEAD));
+      const strength = Math.pow(t, 0.7);
       stick.x = nx * strength;
       stick.y = ny * strength;
     } else {
@@ -557,24 +559,8 @@
       e.y += e.vy * dt;
     }
 
-    // —— 碰撞检测：敌人碰到玩家则受伤（无敌帧闪烁）——
-    const hitR = player.size / 2 + ENEMY_SIZE / 2 - 4;
-    for (let i = 0; i < enemies.length; i++) {
-      const e = enemies[i];
-      const dx = e.x - player.x;
-      const dy = e.y - player.y;
-      if (dx * dx + dy * dy <= hitR * hitR) {
-        if (player.invuln <= 0) {
-          player.invuln = INVOKED_IFRAME;
-          // 轻微击退，给出受击反馈
-          const d = Math.hypot(dx, dy) || 1;
-          player.x += (dx / d) * 6;
-          player.y += (dy / d) * 6;
-          clampToBounds(player, player.size / 2, player.size / 2);
-        }
-        break;
-      }
-    }
+    // —— P0 只验证移动手感：关闭碰撞击退，避免敌人包围圈形成"人群阻力"。
+    // 受击方向/伤害/无敌帧留给 Prototype 1（战斗爽感）再做。
   }
 
   function draw(t) {
