@@ -44,6 +44,7 @@
   <canvas id="game"></canvas>
 </div>
 <script>
+
 (function () {
   'use strict';
 
@@ -61,7 +62,6 @@
   // ===== 玩法参数 =====
   const PLAYER_SPEED = 150;   // 玩家移速 px/s（跟手性优先于纸面数值）
   const ENEMY_SPEED = 110;    // 敌人移速 px/s
-  const ENEMY_COUNT = 14;     // 敌人数量
   const ENEMY_SIZE = 16;      // 敌人逻辑尺寸
   const ENEMY_SEPARATION = 26;// 敌人分离强度系数
   const INVOKED_IFRAME = 0.45; // 无敌帧时长（秒）
@@ -72,74 +72,119 @@
   // ===== 敌人种类（P2 决策测试：不同怪需要不同解法）=====
   // normal 感染体：均衡；swift 疾行体：快/脆/咬轻，遛不掉，优先点杀；
   // armored 重甲体：慢/硬/咬重，经验多，"打不打它"本身是决策
+  // P2 规格 1.5：重甲体新增"每次受击固定减免 4 点（最低 1 点）"
+  // tags 用于下一波预告卡的威胁描述（只给信息，不参与选卡倾向）
+  const ARMOR_REDUCE = 4;     // 重甲体每次受击固定减免
   const ENEMY_KINDS = {
-    normal:  { speed: 60, hp: 35,  touch: 6,  size: 16, color: '#E8823C', xp: 1, samples: 1, weight: 8 },
-    swift:   { speed: 90, hp: 20,  touch: 4,  size: 12, color: '#D8E83C', xp: 1, samples: 1, weight: 4 },
-    armored: { speed: 45, hp: 120, touch: 10, size: 22, color: '#B45BE0', xp: 3, samples: 2, weight: 2 },
+    normal:  { name: '感染体', speed: 60, hp: 35,  touch: 6,  size: 16, color: '#E8823C', xp: 1, samples: 1, weight: 8, tags: ['均衡推进', '标准接触伤'] },
+    swift:   { name: '疾行体', speed: 90, hp: 20,  touch: 4,  size: 12, color: '#D8E83C', xp: 1, samples: 1, weight: 4, tags: ['高速突进', '脆皮', '咬人轻'] },
+    armored: { name: '重甲体', speed: 45, hp: 120, touch: 10, size: 22, color: '#B45BE0', xp: 3, samples: 2, weight: 2, tags: ['高生命', '缓慢推进', '高接触伤害'] },
   };
   const KIND_KEYS = ['normal', 'swift', 'armored'];
-  function rollKind() {
-    let total = 0;
-    for (let i = 0; i < KIND_KEYS.length; i++) total += ENEMY_KINDS[KIND_KEYS[i]].weight;
-    let r = Math.random() * total;
-    for (let i = 0; i < KIND_KEYS.length; i++) {
-      r -= ENEMY_KINDS[KIND_KEYS[i]].weight;
-      if (r <= 0) return KIND_KEYS[i];
-    }
-    return 'normal';
-  }
+  const KIND_LETTER = { I: 'normal', R: 'swift', H: 'armored' }; // 波次序列字母 → 敌人种类
 
   // ===== 战斗参数（Prototype 1）=====
   const ENEMY_MAX_HP = 35;   // 敌人血量上限
-  const RESPAWN_TIME = 1.0;  // 死亡后重生延迟（秒）
   const FLASH_TIME = 0.08;   // 受击白闪时长（秒）
   const HIT_STOP = 0.04;     // 死亡微顿（秒）：逻辑时间冻结，画面照常绘制
+  const DEATH_FADE = 0.25;   // 死亡个体在 enemies 里的保留时长（秒），到期统一摘除
 
-  // 脉冲针（自动单体）
-  const NEEDLE_CD = 0.55;      // 发射间隔（秒）
+  // 脉冲针（自动单体）—— P2 规格 2.2：Lv1 16 伤 / 0.8s，Lv2 22 伤 / 0.8s
+  const NEEDLE_CD = 0.8;      // 发射间隔（秒）
   const NEEDLE_RETRY = 0.1;    // 无目标时的重试间隔（秒）
   const NEEDLE_RANGE = 260;    // 索敌范围
   const NEEDLE_SPEED = 420;    // 弹速 px/s
-  const NEEDLE_DMG = 12;       // 伤害
+  const NEEDLE_DMG_TABLE = [16, 22, 27, 31, 35]; // 按等级取值的伤害表（Lv1..Lv5）
   const NEEDLE_POOL = 32;      // 对象池容量
   const NEEDLE_R = 4;          // 弹体逻辑半径
   const NEEDLE_MARGIN = 40;    // 出屏回收余量
   const NEEDLE_FUSE = 2.5;     // 保险丝：兜底回收，避免漏网弹体永久占用池位
 
-  // 离心刃（环绕近战）
+  // 离心刃（环绕近战）—— P2 规格 2.2：Lv1 8 伤/目标 / 0.9s / 最多 3 目标
   const BLADE_COUNT = 2;       // 刀刃数量
   const BLADE_RADIUS = 46;     // 环绕半径
   const BLADE_OMEGA = 3.6;     // 角速度 rad/s
-  const BLADE_DMG = 8;         // 伤害
-  const BLADE_CD = 0.45;       // 单只敌人的受击间隔（秒）
+  const BLADE_DMG_TABLE = [8, 10, 12, 14, 16]; // 按等级取值的伤害表
+  const BLADE_CD = 0.9;        // 命中窗口（秒）：窗口内最多命中 BLADE_MAX_TARGETS 个目标
+  const BLADE_MAX_TARGETS = 3; // 单个窗口最多命中目标数（"清群但不无限清"）
   const BLADE_R = 7;           // 刀刃逻辑半径（碰撞用）
 
-  // 培养电弧（弹射）
-  const ARC_CD = 1.0;          // 触发间隔（秒）
+  // 培养电弧（弹射）—— P2 规格 2.2：Lv1 6 伤/目标 / 0.8s / 最多 3 目标
+  const ARC_CD = 0.8;          // 触发间隔（秒）
   const ARC_RETRY = 0.1;       // 无目标时的重试间隔（秒）
   const ARC_RANGE = 260;       // 首发索敌范围
   const ARC_CHAIN_RANGE = 120; // 弹射索敌范围
-  const ARC_JUMPS = 2;         // 弹射次数
-  const ARC_DMG = 10;          // 首发伤害
+  const ARC_JUMPS = 2;         // 弹射次数（首发 + 2 跳 = 最多 3 目标）
+  const ARC_DMG_TABLE = [6, 8, 10, 12, 14];    // 按等级取值的伤害表
   const ARC_FALLOFF = 0.8;     // 每次弹射伤害衰减（-20%）
   const ARC_LIFE = 0.12;       // 电弧存在时间（秒）
   const ARC_POOL = 4;          // 并发电弧上限
   const ARC_SEGMENTS = 3;      // 最大折线段数（玩家 → 命中1 → 命中2 → 命中3）
   const ARC_JITTER = 0.34;     // midpoint 抖动幅度系数
 
-  // ===== 构筑系统参数（Prototype 2）=====
-  const MAX_SLOTS = 4;              // 技能槽数量
+  // ===== 构筑系统参数（Prototype 2 / P2 规格 2.1-2.6）=====
+  const MAX_SLOTS = 4;              // 机能槽数量（4 槽竞争：装满就装不下新机能）
   const SKILL_LV_CAP = 5;           // 单技能等级上限
-  const SKILL_ORDER = ['needle', 'blade', 'arc']; // 技能遍历顺序（发牌/槽位渲染用）
+  const SKILL_ORDER = ['needle', 'blade', 'arc']; // 武器遍历顺序（发牌用）
+  const SLOT_ORDER = ['needle', 'blade', 'arc', 'regen', 'cilia']; // 槽位 UI 展示顺序（武器 + 生存器官）
+  const ORGAN_ORDER = ['regen', 'cilia'];   // 生存器官遍历顺序
+  const ORGAN_LV_CAP = 2;           // 生存器官等级上限（Lv1 即时兑现，Lv2 补一层）
   const XP_STEP = 3;                // 升到 n+1 级需 n*XP_STEP 点经验
-  const DMG_PER_LV = 0.25;          // 每级伤害加成（+25%/级）
-  const HP_CARD_GAIN = 30;          // 扩容卡的生命上限增量
-  const SPEED_CARD_MULT = 1.15;     // 鞭毛强化的移速乘数
+  const HP_CARD_GAIN = 30;          // 扩容卡的生命上限增量（Lv9 前的兜底卡）
+  const SPEED_CARD_MULT = 1.15;     // 鞭毛强化的移速乘数（Lv9 前的兜底卡）
   const BRANCH_SAMPLE_COST = 10;    // 分支进化消耗样本
   const BRANCH_MIN_LV = 3;          // 分支进化所需最低等级
-  const RAIN_SPREAD = Math.PI / 12; // 针雨协议扇形半角（±15°）
-  const EXEC_STACK_MAX = 5;         // 处决针第 N 发触发
-  const EXEC_MULT = 2.5;            // 处决针触发倍率（第5发 +150%）
+
+  // —— 生存器官（P2 规格 2.4：解决"现在可能死"和"总被追上"）——
+  // 再生膜 Lv1：上限 +30 且立即回 24；Lv2：上限 +20 且回 12。占 1 槽。
+  const REGEN_TABLE = [{ maxHp: 30, heal: 24 }, { maxHp: 20, heal: 12 }];
+  // 运动纤毛 Lv1：移速 +15%；Lv2：再 +8%。占 1 槽。
+  const CILIA_TABLE = [0.15, 0.08];
+
+  // —— 循环卡池（P2 规格 2.5：解决 9 级后不再给"生命上限+30"凑数）——
+  const LOOP_POOL_LEVEL = 9;   // 达到该等级切换到循环卡池
+  const SPEC_FIRST = 0.35;     // 首次专精强化 +35%
+  const SPEC_FALLOFF = 0.6;     // 每次再取乘 0.6（衰减）
+  const SPEC_FLOOR = 0.08;      // 衰减下限 +8%
+  const SPEC_CAP = 0.60;        // 单武器专精累计上限（超出即移除该候选）
+  const LOCKED_CHANCE = 0.3;    // 未解锁武器出现在强化池里的概率（不逼玩家提前拿）
+
+  // —— 分支进化（P2 规格 2.6：Lv3 互斥二选一）——
+  const THROUGH_EXTRA = 2;          // 贯通针：穿透 +2 名额外敌人
+  const THROUGH_FIRST_MULT = 0.9;   // 贯通针：首目标 -10% 伤害
+  const PIERCE_ARMOR_MULT = 1.15;   // 破甲针：对重甲 +15% 伤害（并无视减免）
+
+  // —— 战术调频（限时增益，不占槽）——
+  const TACTIC_DEFS = [
+    { key: 'overload', name: '脉冲超载', desc: '8秒内武器伤害 +30%', dur: 8, mag: 0.30 },
+    { key: 'haste',    name: '采样冲刺', desc: '10秒内移速 +25%',    dur: 10, mag: 0.25 },
+    { key: 'guard',    name: '代谢抑制', desc: '8秒内受击伤害 -35%', dur: 8, mag: 0.35 },
+  ];
+
+  // ===== 波次调度（P2 规格 1.2-1.4）=====
+  // [start, end, interval, rest, waveName, enemySequence]  I=感染体 R=疾行体 H=重甲体
+  // rest 包含在波次总时长内：[start, end-rest) 出怪，[end-rest, end) 收尾+喘息
+  const WAVES = [
+    [  0,  20, 2.0 , 3, '初始感染', 'IIIIII'       ],
+    [ 20,  40, 1.5 , 3, '感染增殖', 'IIIIIIII'     ],
+    [ 40,  60, 1.5 , 3, '首次快攻', 'IIRIRIRIR'    ],
+    [ 60,  80, 1.5 , 3, '疾行围猎', 'RIRRIRRIRR'   ],
+    [ 80, 105, 2.0 , 4, '装甲突破', 'HIHIHIH'      ],
+    [105, 130, 1.5 , 4, '混合压力', 'IRHIRIRHIRIR' ],
+    [130, 155, 1.5 , 4, '疾行冲击', 'RRIRRIRRIRRR' ],
+    [155, 180, 1.65, 4, '重甲推进', 'HHHIHHIHII'   ],
+  ];
+  const LOOP_FROM = WAVES[WAVES.length - 1][1];  // 180s 之后进入循环段
+  const LOOP_FIRST = 5;                          // 循环段从 W6（混合压力）开始
+  const LOOP_LEN = LOOP_FROM - WAVES[LOOP_FIRST][0]; // 75s：W6→W7→W8
+  const LOOP_HP_PER_ROUND = 0.10;                // 每循环一轮，敌人血量 +10%
+  const WAVE_SOFT_CAP = 8;                       // 场上存活软上限：满则延期投放（硬规则 3）
+  const MIN_SPAWN_GAP = 0.9;                     // 全局最小出生间隔（秒，硬规则 3）
+  const PREVIEW_LEN = 3;                         // PREVIEW 阶段时长（秒）
+  const CLEANUP_FADE = 1.6;                      // CLEANUP 残敌退场淡出时长（秒）
+  const SECTOR_SPREAD = Math.PI / 3;             // 出生角度：波次扇区中心 ±60°
+  // 每波扇区中心（度，0=右，顺时针为正）：让怪从可预期的一侧压过来
+  const WAVE_SECTORS = [-90, 0, 90, 180, -45, 45, 135, -135];
   const SAMPLE_POOL = 40;           // 样本点对象池容量（固定，不扩容）
   const SAMPLE_PICK_R = 24;         // 样本拾取半径
   const SAMPLE_R = 4;               // 样本绘制半径
@@ -217,8 +262,8 @@
   };
   const ENEMY_TOUCH_DMG = 6; // 怪接触伤害
 
-  // ===== 构筑状态（Prototype 2）=====
-  // branch: null | 'rain' | 'execute'（不可逆，只能写一次）
+  // ===== 构筑状态（Prototype 2 / P2 规格）=====
+  // branch: null | 'through' | 'pierce'（不可逆，只能写一次，P2 规格 2.6）
   const skills = {
     needle: { owned: true,  lv: 1, branch: null },
     blade:  { owned: false, lv: 0, branch: null },
@@ -230,6 +275,15 @@
     needle: { name: '脉冲针', short: '针', color: '#38E8E0', icon: 'assets/icons/needle.png' },
     blade:  { name: '离心刃', short: '刃', color: '#FF7A1A', icon: 'assets/icons/blade.png' },
     arc:    { name: '培养电弧', short: '弧', color: '#B45BE0', icon: 'assets/icons/arc.png' }
+  };
+  // 生存器官（P2 规格 2.4）：各占 1 槽，同一机能只允许一个实例
+  const ORGAN_META = {
+    regen: { name: '再生膜',   short: '膜', color: '#5BE08C' },
+    cilia: { name: '运动纤毛', short: '纤', color: '#FFD75E' },
+  };
+  const organs = {
+    regen: { owned: false, lv: 0 },
+    cilia: { owned: false, lv: 0 },
   };
   // 技能图标预加载
   const SKILL_ICONS = {};
@@ -247,40 +301,49 @@
   let samples = 0;        // SAMPLE 计数
   let uiOpen = false;     // 三选一 UI 打开：update 冻结、摇杆输入忽略
   let branchMode = false; // 分支子选择中（两张分支卡 + 返回）
-  let speedMult = 1;      // 移速乘区（补弱点"移速+15%"用）
-  let execTarget = null;  // 处决针：当前叠层目标
-  let execCount = 0;      // 处决针：已叠层数
+  let speedMult = 1;      // 移速乘区（运动纤毛 / 鞭毛强化共用）
   // —— 一局统计（死亡结算面板读取，冻结后不再变化）——
   let killCount = 0;      // 本局击杀数
   let runSamples = 0;     // 本局累计拾取样本数（只增不减；samples 是可消耗余额）
+  // —— P2 构筑决策 A-E 运行时状态（重开时必须一并清零）——
+  const skillBonus = { needle: 0, blade: 0, arc: 0 };   // 专精累计加成（可重复获取）
+  const specCount = { needle: 0, blade: 0, arc: 0 };     // 专精获取次数（决定数值衰减）
+  const buffs = { overload: 0, haste: 0, guard: 0 };     // 战术调频剩余时间（秒）
 
   // ===== 敌人集合 =====
-  // 场上恒定 20 只：数组只在初始化时 push 一次，之后死亡/重生只改字段，不增删
+  // P2：不再有"恒定 14 只"的固定池。数组由 WaveDirector 投放 push、
+  // 死亡后延迟由 compactEnemies 摘除（死亡不补位，硬规则 1）。
   const enemies = [];
 
-  // 屏幕四周外圈定位（首次出生与死亡重生共用），复用同一个 scratch 对象避免每帧 new
-  const edgeScratch = { x: 0, y: 0 };
-  function edgePoint(i) {
-    // 沿屏幕四周外圈生成，避免一开始就压在玩家身上
-    const side = i % 4;
-    if (side === 0) { edgeScratch.x = -20; edgeScratch.y = Math.random() * LOGICAL_H; }
-    else if (side === 1) { edgeScratch.x = LOGICAL_W + 20; edgeScratch.y = Math.random() * LOGICAL_H; }
-    else if (side === 2) { edgeScratch.x = Math.random() * LOGICAL_W; edgeScratch.y = -20; }
-    else { edgeScratch.x = Math.random() * LOGICAL_W; edgeScratch.y = LOGICAL_H + 20; }
-    return edgeScratch;
+  // 沿指定方向求出屏点：保证新怪"从某一侧进来"，而不是糊在玩家身上
+  const rayScratch = { x: 0, y: 0 };
+  function rayExit(a) {
+    const cx = player.x, cy = player.y;
+    const dx = Math.cos(a), dy = Math.sin(a);
+    const m = 30; // 出屏余量
+    let t = 0;
+    if (dx > 1e-6) t = Math.max(t, (LOGICAL_W + m - cx) / dx);
+    else if (dx < -1e-6) t = Math.max(t, (-m - cx) / dx);
+    if (dy > 1e-6) t = Math.max(t, (LOGICAL_H + m - cy) / dy);
+    else if (dy < -1e-6) t = Math.max(t, (-m - cy) / dy);
+    if (t <= 0) t = 40;
+    rayScratch.x = cx + dx * t;
+    rayScratch.y = cy + dy * t;
+    return rayScratch;
   }
 
-  function spawnEnemy(i) {
-    const p = edgePoint(i);
-    const kind = rollKind();
+  // 波次投放一只敌人：kind 由波次序列决定，angle 为该波扇区内的随机方向
+  function spawnEnemy(kind, angle, hpMult) {
+    const p = rayExit(angle);
     const K = ENEMY_KINDS[kind];
+    const hp = K.hp * hpMult;
     enemies.push({
       x: p.x,
       y: p.y,
       vx: 0,
       vy: 0,
-      // 包围角度均分（+微小抖动），避免纯随机导致的角度扎堆
-      seed: (i / ENEMY_COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.25,
+      // 包围角 = 出场方向：怪按"从哪来"的角度贴上来，避免角度扎堆
+      seed: angle + (Math.random() - 0.5) * 0.25,
       wobble: 0.6 + Math.random() * 0.8, // 每只细胞的蠕动相位频率
       orbitR: 45 + Math.random() * 25,   // 包围半径 45-70：松一圈，不糊脸；刀刃在 46px，近端怪仍在刀刃范围内
       kind: kind,                        // normal / swift / armored
@@ -291,41 +354,190 @@
       er: K.size / 2,                    // 本体碰撞半径（按种类）
       sprite: ENEMY_SPRITES[kind],         // 预渲染精灵（按种类）
       spriteWhite: ENEMY_WHITE_SPRITES[kind], // 受击白闪用的纯白版
-      hp: K.hp,
-      maxHp: K.hp,
+      hp: hp,
+      maxHp: hp,
       alive: true,
-      respawnT: 0,
+      retreating: false,  // CLEANUP 退场中：不给经验/不掉落/不咬人
+      fadeT: 0,           // 退场淡出进度（retreating 时递减）
       flash: 0,
       bladeCd: 0,
       sx: 0, sy: 0 // 分离推力缓存（两阶段计算用）
     });
   }
 
-  // 死亡后原地重生：回到屏幕边缘，血量回满，种类重 roll
-  function respawnEnemy(e, i) {
-    const p = edgePoint(i);
-    const kind = rollKind();
-    const K = ENEMY_KINDS[kind];
-    e.x = p.x;
-    e.y = p.y;
-    e.vx = 0;
-    e.vy = 0;
-    e.kind = kind;
-    e.speed = K.speed;
-    e.touchDmg = K.touch;
-    e.xpValue = K.xp;
-    e.sampleValue = K.samples;
-    e.er = K.size / 2;
-    e.sprite = ENEMY_SPRITES[kind];
-    e.spriteWhite = ENEMY_WHITE_SPRITES[kind];
-    e.hp = K.hp;
-    e.maxHp = K.hp;
-    e.alive = true;
-    e.respawnT = 0;
-    e.flash = 0;
-    e.bladeCd = 0;
-    e.sx = 0;
-    e.sy = 0;
+  // ============================================================
+  // WaveDirector（P2 规格 1.2-1.4）
+  // 波次调度器统一创建敌人：PREVIEW → SPAWNING → CLEANUP → REST。
+  // 与预告共用同一个游戏时钟 elapsed（硬规则 6）。
+  // ============================================================
+
+  // 某个"波次实例"的起始时刻（round=0 为首轮 8 波；round>=1 为 W6-W8 循环轮）
+  function waveStartTime(i, round) {
+    if (round <= 0) return WAVES[i][0];
+    return LOOP_FROM + (round - 1) * LOOP_LEN + (WAVES[i][0] - WAVES[LOOP_FIRST][0]);
+  }
+
+  // 当前时钟落在哪个波次实例：{ i, round, start, end, hpMult }
+  function waveDefAt(t) {
+    if (t < LOOP_FROM) {
+      for (let i = 0; i < WAVES.length; i++) {
+        const W = WAVES[i];
+        if (t >= W[0] && t < W[1]) return mkWaveInst(i, 0);
+      }
+      const last = WAVES.length - 1;
+      return mkWaveInst(last, 0);
+    }
+    const k = Math.floor((t - LOOP_FROM) / LOOP_LEN);       // 已完成的循环轮数
+    const local = t - LOOP_FROM - k * LOOP_LEN;            // 本轮内偏移
+    for (let i = LOOP_FIRST; i < WAVES.length; i++) {
+      const W = WAVES[i];
+      if (local >= W[0] - WAVES[LOOP_FIRST][0] && local < W[1] - WAVES[LOOP_FIRST][0]) {
+        return mkWaveInst(i, k + 1);
+      }
+    }
+    return mkWaveInst(WAVES.length - 1, k + 1);
+  }
+
+  function mkWaveInst(i, round) {
+    const W = WAVES[i];
+    return {
+      i: i, round: round,
+      start: waveStartTime(i, round),
+      end: waveStartTime(i, round) + (W[1] - W[0]),
+      hpMult: 1 + round * LOOP_HP_PER_ROUND // 循环轮每轮 +10% 血量
+    };
+  }
+
+  // 下一波实例（预告数据源）：首轮按序推进，末波回卷到 W6 循环段
+  function nextWaveInst(cur) {
+    if (cur.i + 1 < WAVES.length) return mkWaveInst(cur.i + 1, cur.round);
+    return mkWaveInst(LOOP_FIRST, cur.round + 1);
+  }
+
+  // 当前波次的运行时调度数据（唯一的"真实调度"来源，UI 预告与实际投放共用）
+  // i: -1 是哨兵值：保证 t=0 时 updateWaveDirector 一定先跑一次 beginWave 建立 W1
+  const waveNow = {
+    i: -1, round: 0, start: 0, end: 0, name: '', seq: '',
+    interval: 2, rest: 3, hpMult: 1,
+    previewEnd: 0, spawnEnd: 0, restStart: 0,
+    phase: 'preview', cursor: 0, lastSpawnAt: -99,
+    spawned: 0, dropped: 0 // 已投放数 / 因窗口关闭被取消的投放任务数
+  };
+
+  // 切换到新的波次实例：建队列 + 回到 PREVIEW（硬规则 2、6）
+  function beginWave(inst) {
+    const W = WAVES[inst.i];
+    waveNow.i = inst.i;
+    waveNow.round = inst.round;
+    waveNow.start = inst.start;
+    waveNow.end = inst.end;
+    waveNow.name = W[4];
+    waveNow.seq = W[5];
+    waveNow.interval = W[2];
+    waveNow.rest = W[3];
+    waveNow.hpMult = inst.hpMult;
+    waveNow.spawnEnd = inst.end - W[3];                       // 到 end-rest 关闭投放窗口
+    waveNow.previewEnd = inst.start + Math.min(PREVIEW_LEN, (waveNow.spawnEnd - inst.start) * 0.25);
+    waveNow.restStart = waveNow.spawnEnd + W[3] * 0.5;        // rest 前半收尾、后半喘息
+    waveNow.phase = 'preview';
+    waveNow.cursor = 0;                                      // 队列游标：一波计划 N 只就有 N 个任务
+    waveNow.lastSpawnAt = -99;
+    waveNow.spawned = 0;
+    waveNow.dropped = 0;
+  }
+
+  function aliveEnemyCount() {
+    let n = 0;
+    for (let i = 0; i < enemies.length; i++) if (enemies[i].alive) n++;
+    return n;
+  }
+
+  // CLEANUP：停止出生后残敌退场，不给经验/不掉落（硬规则 4、5）
+  function beginCleanup() {
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive || e.retreating) continue;
+      e.retreating = true;
+      e.fadeT = CLEANUP_FADE;
+      e.xpValue = 0;        // 双保险：退场个体不产出任何构筑资源
+      e.sampleValue = 0;
+    }
+  }
+
+  // 每帧推进波次状态机。调用方保证 elapsed 是当前逻辑时钟
+  function updateWaveDirector() {
+    const inst = waveDefAt(elapsed);
+    if (inst.i !== waveNow.i || inst.round !== waveNow.round) beginWave(inst);
+    const t = elapsed;
+
+    if (t < waveNow.previewEnd) waveNow.phase = 'preview';
+    else if (t < waveNow.spawnEnd) waveNow.phase = 'spawning';
+    else if (t < waveNow.restStart) {
+      if (waveNow.phase !== 'cleanup') { waveNow.phase = 'cleanup'; beginCleanup(); }
+    } else waveNow.phase = 'rest';
+
+    if (waveNow.phase !== 'spawning') return;
+
+    // 队列守恒：序列有几个字符就有几个投放任务，按序投放
+    while (waveNow.cursor < waveNow.seq.length) {
+      const at = waveNow.previewEnd + waveNow.cursor * waveNow.interval;
+      if (t < at) break;                                       // 还没到计划时刻
+      if (t >= waveNow.spawnEnd) {                              // 硬规则 4：窗口关闭，未投放任务取消
+        waveNow.dropped = waveNow.seq.length - waveNow.cursor;
+        waveNow.cursor = waveNow.seq.length;
+        break;
+      }
+      if (aliveEnemyCount() >= WAVE_SOFT_CAP) break;            // 硬规则 3：软上限满 → 延期投放
+      if (t - waveNow.lastSpawnAt < MIN_SPAWN_GAP) break;       // 硬规则 3：全局出生间隔 ≥0.9s
+      const ch = waveNow.seq[waveNow.cursor];
+      const center = WAVE_SECTORS[waveNow.i] * Math.PI / 180;
+      const angle = center + (Math.random() - 0.5) * 2 * SECTOR_SPREAD;
+      spawnEnemy(KIND_LETTER[ch] || 'normal', angle, waveNow.hpMult);
+      waveNow.cursor++;
+      waveNow.spawned++;
+      waveNow.lastSpawnAt = t;
+    }
+  }
+
+  // 波次序列画像：主敌种 / 占比 / 威胁描述（预告卡用，只给信息不做推荐）
+  function waveProfile(seq) {
+    const counts = { I: 0, R: 0, H: 0 };
+    for (let i = 0; i < seq.length; i++) if (counts[seq[i]] !== undefined) counts[seq[i]]++;
+    let best = 'I', bestN = -1;
+    for (const k in counts) if (counts[k] > bestN) { best = k; bestN = counts[k]; }
+    const kind = KIND_LETTER[best];
+    const ratio = Math.round((bestN / seq.length) * 20) * 5; // 取到 5% 整数
+    return { kind: kind, ratio: ratio, tags: ENEMY_KINDS[kind].tags };
+  }
+
+  // 下一波预告信息（真实调度数据：与 updateWaveDirector 共用 elapsed）
+  function nextWaveInfo() {
+    const nxt = nextWaveInst(waveDefAt(elapsed));
+    const W = WAVES[nxt.i];
+    return {
+      label: 'W' + (nxt.i + 1),
+      name: W[4],
+      round: nxt.round,
+      remain: Math.max(0, nxt.start - elapsed),
+      profile: waveProfile(W[5])
+    };
+  }
+
+  // 摘除已彻底消失的个体（死亡淡出/退场结束），倒序换位删除，避免迭代中改数组
+  function compactEnemies(dt) {
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      if (e.alive) continue;
+      e.fadeT -= dt;
+      if (e.fadeT > 0) continue;
+      enemies[i] = enemies[enemies.length - 1];
+      enemies.pop();
+    }
+  }
+
+  // 清场：玩家死亡重生时把残留个体一次清空（不给经验/掉落）
+  function clearEnemies() {
+    enemies.length = 0;
   }
 
   // 敌人精灵烘焙（2x 超采样：96px 画布对应 48 逻辑像素），按种类烘焙（颜色+尺寸）
@@ -386,7 +598,7 @@
     armored: makeWhiteVersion(ENEMY_SPRITES.armored)
   };
 
-  for (let i = 0; i < ENEMY_COUNT; i++) spawnEnemy(i);
+  // P2：开局场上无怪。首波由 WaveDirector 在 PREVIEW 结束后按序列投放。
 
   // ============================================================
   // 战斗系统（Prototype 1）
@@ -539,15 +751,21 @@
     ctx.restore();
   }
 
-  function hitEnemy(e, dmg) {
-    if (!e.alive) return;
+  // 伤害结算入口。pierceArmor=true 时为破甲针弹：无视重甲减免并对重甲 +15%
+  function hitEnemy(e, dmg, pierceArmor) {
+    if (!e.alive || e.retreating) return;
+    // 破甲针：对重甲 +15%
+    if (pierceArmor && e.kind === 'armored') dmg *= PIERCE_ARMOR_MULT;
+    // 重甲减免：每次受击固定减免 4 点（最低 1 点）。破甲针无视。
+    // 规格 2.2 校核：离心刃 8 伤打重甲剩 4，脉冲针 Lv2 22 伤打重甲剩 18。
+    if (e.kind === 'armored' && !pierceArmor) dmg = Math.max(1, dmg - ARMOR_REDUCE);
     e.hp -= dmg;
     e.flash = FLASH_TIME;
     spawnDmgNum(e.x, e.y, dmg);
     if (e.hp <= 0) {
       e.alive = false;
       e.hp = 0;
-      e.respawnT = RESPAWN_TIME;
+e.fadeT = DEATH_FADE; // 死亡不补位（硬规则 1）：只保留一小段淡出后摘除
       killCount++;                 // 结算面板"击杀"统计
       spawnDeathBurst(e.x, e.y);
       // 40ms 微顿：连续死亡不断刷新为 0.04s，手感上就是"一串黏住的顿"
@@ -557,18 +775,16 @@
       // P2：死亡给构筑资源（经验 + 样本，按种类：重甲给 3 经验 2 样本）
       gainXp(e.xpValue);
       for (let k = 0; k < e.sampleValue; k++) dropSample(e.x, e.y);
-      // 处决针：目标死亡清零叠层（换目标/死亡清零规则的一部分）
-      if (e === execTarget) { execTarget = null; execCount = 0; }
     }
   }
 
-  // 最近的存活敌人；exclude 为已命中列表（电弧弹射去重）
+  // 最近的存活敌人；exclude 为已命中列表（电弧弹射去重）。退场个体不参与索敌。
   function nearestEnemy(x, y, range, exclude, excludeCount) {
     let best = null;
     let bestD = range * range;
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
-      if (!e.alive) continue;
+      if (!e.alive || e.retreating) continue;
       if (exclude) {
         let skip = false;
         for (let j = 0; j < excludeCount; j++) {
@@ -618,12 +834,13 @@
 
   const needles = [];
   for (let i = 0; i < NEEDLE_POOL; i++) {
-    needles.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, rot: 0, life: 0 });
+    // pierceUsed：贯通分支已贯穿的目标数（首目标 +2 名额外）；lastHit：本次飞行已打过的目标
+    needles.push({ active: false, x: 0, y: 0, vx: 0, vy: 0, rot: 0, life: 0, pierceUsed: 0, lastHit: null });
   }
   let needleCursor = 0;
   let needleCd = NEEDLE_CD;
 
-  // 分配一个池槽位并沿角度 a 发射（rain 分支会一次占用 3 个槽位）
+  // 分配一个池槽位并沿角度 a 发射
   function spawnNeedleAt(a) {
     let slot = null;
     let idx = 0;
@@ -641,31 +858,13 @@
     slot.vy = Math.sin(a) * NEEDLE_SPEED;
     slot.rot = a;
     slot.life = NEEDLE_FUSE;
+    slot.pierceUsed = 0;
+    slot.lastHit = null;
   }
 
   function fireNeedle(target) {
     const a = Math.atan2(target.y - player.y, target.x - player.x);
-    // 分支"针雨协议"：扇形 3 发，单发伤害不变
-    if (skills.needle.branch === 'rain') {
-      spawnNeedleAt(a - RAIN_SPREAD);
-      spawnNeedleAt(a);
-      spawnNeedleAt(a + RAIN_SPREAD);
-    } else {
-      spawnNeedleAt(a);
-    }
-  }
-
-  // 分支"处决针"：连续命中同一目标叠层，第 5 发伤害 ×2.5（+150%），随后清零重新计
-  function needleHitDamage(e) {
-    const base = needleDmg();
-    if (skills.needle.branch !== 'execute') return base;
-    if (e === execTarget) execCount++;
-    else { execTarget = e; execCount = 1; }
-    if (execCount >= EXEC_STACK_MAX) {
-      execCount = 0;
-      return base * EXEC_MULT;
-    }
-    return base;
+    spawnNeedleAt(a);
   }
 
   const NEEDLE_HIT_R = ENEMY_R + NEEDLE_R;
@@ -691,12 +890,22 @@
 
       for (let j = 0; j < enemies.length; j++) {
         const e = enemies[j];
-        if (!e.alive) continue;
+        if (!e.alive || e.retreating || e === p.lastHit) continue;
         const dx = e.x - p.x, dy = e.y - p.y;
         const hr = e.er + NEEDLE_R; // 按怪体型算命中半径
         if (dx * dx + dy * dy <= hr * hr) {
-          hitEnemy(e, needleHitDamage(e));
+          // 分支"贯通针"：首目标 -10%，之后继续贯穿 2 名敌人；未分支时命中即回收
+          const through = skills.needle.branch === 'through';
+          const isFirst = p.pierceUsed === 0;
+          hitEnemy(e, needleDmg() * (through && isFirst ? THROUGH_FIRST_MULT : 1),
+                   skills.needle.branch === 'pierce');
           spawnSparks(p.x, p.y);
+          if (through) {
+            p.pierceUsed++;
+            p.lastHit = e;
+            if (p.pierceUsed > THROUGH_EXTRA) { p.active = false; break; } // 贯穿额度用尽
+            continue; // 保留弹体，继续找下一个目标
+          }
           p.active = false; // 命中即回收
           break;
         }
@@ -759,6 +968,9 @@
   const bladeRot = new Float32Array(BLADE_COUNT);
   const BLADE_HIT_R = ENEMY_R + BLADE_R;
   const BLADE_HIT_R2 = BLADE_HIT_R * BLADE_HIT_R;
+  // P2 规格 2.2：命中窗口 0.9s，窗口内最多命中 3 个目标
+  let bladeWindow = 0;
+  let bladeHitsLeft = 0;
 
   function updateBlades(dt) {
     if (!skills.blade.owned) return;
@@ -770,17 +982,25 @@
       bladeX[b] = player.x + Math.cos(a) * BLADE_RADIUS;
       bladeY[b] = player.y + Math.sin(a) * BLADE_RADIUS;
     }
+    // 命中窗口：到期重置配额，保证"最多 3 目标 / 0.9s"
+    bladeWindow -= dt;
+    if (bladeWindow <= 0) {
+      bladeWindow = BLADE_CD;
+      bladeHitsLeft = BLADE_MAX_TARGETS;
+    }
     // 近战命中：每只敌人独立 bladeCd，保证单次掠过只掉一次血
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
-      if (!e.alive || e.bladeCd > 0) continue;
+      if (!e.alive || e.retreating || e.bladeCd > 0) continue;
+      if (bladeHitsLeft <= 0) break; // 本窗口配额耗尽，等下一个窗口
       for (let b = 0; b < BLADE_COUNT; b++) {
         const dx = e.x - bladeX[b], dy = e.y - bladeY[b];
         const hr = e.er + BLADE_R; // 按怪体型算命中半径
         if (dx * dx + dy * dy <= hr * hr) {
           e.bladeCd = BLADE_CD;
-          hitEnemy(e, bladeDmg());
+          hitEnemy(e, bladeDmg(), false);
           spawnSparks(e.x, e.y);
+          bladeHitsLeft--;
           break;
         }
       }
@@ -828,7 +1048,7 @@
     let dmg = arcDmg();
     let fromX = first.x, fromY = first.y;
     arcNodeX[nodeCount] = fromX; arcNodeY[nodeCount] = fromY; nodeCount++;
-    hitEnemy(first, dmg);
+    hitEnemy(first, dmg, false);
     dmg *= ARC_FALLOFF;
     spawnSparks(fromX, fromY);
 
@@ -838,7 +1058,7 @@
       if (!next) break;
       arcHit[hitCount++] = next;
       const nx = next.x, ny = next.y;
-      hitEnemy(next, dmg);
+      hitEnemy(next, dmg, false);
       dmg *= ARC_FALLOFF;
       spawnSparks(nx, ny);
       fromX = nx; fromY = ny;
@@ -915,11 +1135,20 @@
   // 三类决策——①强化当前构筑 ②补弱点 ③改变路线。
   // ============================================================
 
-  // ===== 伤害按等级缩放 =====
-  // 1 + 0.25*(lv-1)：Lv1 基准，每级 +25%，Lv5 为基准的 2 倍
-  function needleDmg() { return NEEDLE_DMG * (1 + 0.25 * (skills.needle.lv - 1)); }
-  function bladeDmg() { return BLADE_DMG * (1 + 0.25 * (skills.blade.lv - 1)); }
-  function arcDmg() { return ARC_DMG * (1 + 0.25 * (skills.arc.lv - 1)); }
+  // ===== 伤害按等级取值 =====
+  // P2 规格 2.2：每件武器按等级查表（不再用统一 +25%/级），再乘专精与战术调频增益
+  function lvIdx(lv, len) { return Math.max(0, Math.min(len - 1, lv - 1)); }
+
+  // 战术调频增益：脉冲超载（武器伤害 +30%）
+  function buffDmg() { return buffs.overload > 0 ? 1 + 0.30 : 1; }
+  // 战术调频增益：采样冲刺（移速 +25%）
+  function buffHaste() { return buffs.haste > 0 ? 1 + 0.25 : 1; }
+  // 战术调频增益：代谢抑制（受击伤害 -35%）
+  function buffGuard() { return buffs.guard > 0 ? 1 - 0.35 : 1; }
+
+  function needleDmg() { return NEEDLE_DMG_TABLE[lvIdx(skills.needle.lv, NEEDLE_DMG_TABLE.length)] * (1 + skillBonus.needle) * buffDmg(); }
+  function bladeDmg() { return BLADE_DMG_TABLE[lvIdx(skills.blade.lv, BLADE_DMG_TABLE.length)] * (1 + skillBonus.blade) * buffDmg(); }
+  function arcDmg() { return ARC_DMG_TABLE[lvIdx(skills.arc.lv, ARC_DMG_TABLE.length)] * (1 + skillBonus.arc) * buffDmg(); }
 
   // ===== 经验与升级 =====
   function gainXp(n) {
@@ -988,10 +1217,33 @@
     ctx.restore();
   }
 
-  // ===== 发牌：每次恰好 3 张，类别齐全 =====
-  // 卡片：{ kind, cat, title, desc }
+  // ===== 发牌：每次恰好 3 张（类别齐全）=====
+  // 卡片：{ kind, cat, title, desc, sig }
+  // P2 规格 2.5 卡池生成器五步：
+  //   ① 读玩家状态 ② 读下一波配置 ③ 三类各生成候选 ④ 过滤无效 ⑤ 耗尽时用可重复强化兜底
   let cards = [];
   let cardRects = []; // {x,y,w,h,card}，供点击命中判定
+
+  // 等级 → 伤害表的映射（卡面文案用真实数值，不写"+25%"这种含糊描述）
+  const DMG_TABLES = { needle: NEEDLE_DMG_TABLE, blade: BLADE_DMG_TABLE, arc: ARC_DMG_TABLE };
+
+  // 第 1 步：读玩家状态（等级 / 血量 / 槽位 / 武器等级 / 分支 / 专精次数）
+  function readPlayerState() {
+    const owned = [], organsOwned = [];
+    for (let i = 0; i < SKILL_ORDER.length; i++) {
+      if (skills[SKILL_ORDER[i]].owned) owned.push(SKILL_ORDER[i]);
+    }
+    for (let i = 0; i < ORGAN_ORDER.length; i++) {
+      if (organs[ORGAN_ORDER[i]].owned) organsOwned.push(ORGAN_ORDER[i]);
+    }
+    const used = slotsUsed();
+    return {
+      level: playerLevel, hp: player.hp, maxHp: player.maxHp,
+      slots: used, canInstall: used < MAX_SLOTS,
+      owned: owned, locked: lockedSkills(), organs: organsOwned,
+      branch: skills.needle.branch, samples: samples
+    };
+  }
 
   function upgradeableSkills() {
     const list = [];
@@ -1003,9 +1255,14 @@
     return list;
   }
 
+  // 槽位统计：武器与生存器官都占 1 槽（P2 规格 2.1 的四槽竞争）
   function slotsUsed() {
     let n = 0;
-    for (let i = 0; i < SKILL_ORDER.length; i++) if (skills[SKILL_ORDER[i]].owned) n++;
+    for (let i = 0; i < SLOT_ORDER.length; i++) {
+      const k = SLOT_ORDER[i];
+      if (k === 'regen' || k === 'cilia') { if (organs[k].owned) n++; }
+      else if (skills[k].owned) n++;
+    }
     return n;
   }
 
@@ -1017,76 +1274,254 @@
     return list;
   }
 
+  // 武器升级卡：卡面写明真实伤害数值变化
+  function upgradeCard(k) {
+    const T = DMG_TABLES[k];
+    const from = T[lvIdx(skills[k].lv, T.length)];
+    const to = T[lvIdx(skills[k].lv + 1, T.length)];
+    return {
+      kind: 'upgrade', cat: '强化当前构筑', skill: k,
+      sig: 'upgrade|' + k,
+      title: SKILL_META[k].name + ' Lv' + skills[k].lv + '→Lv' + (skills[k].lv + 1),
+      desc: '伤害 ' + from + '→' + to + '（间隔不变）'
+    };
+  }
+
+  // 专精卡（可重复）：数值衰减 +35% → +8%，单武器累计封顶 +60%
+  function specializeCard(k) {
+    if (skillBonus[k] >= SPEC_CAP - 0.001) return null; // 已达上限：移除该候选（步骤④）
+    const add = Math.max(SPEC_FLOOR, SPEC_FIRST * Math.pow(SPEC_FALLOFF, specCount[k]));
+    return {
+      kind: 'specialize', cat: '强化当前构筑', skill: k,
+      sig: 'specialize|' + k,
+      title: SKILL_META[k].name + ' 专精 Lv' + specCount[k] + '→Lv' + (specCount[k] + 1),
+      desc: '伤害 +' + Math.round(add * 100) + '%（累计 +' + Math.round((skillBonus[k] + add) * 100) + '%）'
+    };
+  }
+
+  // 生存器官卡（占 1 槽，卡面必须标明占位；同一机能只允许一个实例）
+  function organCard(key) {
+    const o = organs[key], M = ORGAN_META[key];
+    if (!o.owned) {
+      const d = key === 'regen' ? '生命上限 +' + REGEN_TABLE[0].maxHp + '，立即回复 ' + REGEN_TABLE[0].heal
+                                 : '移速 +' + Math.round(CILIA_TABLE[0] * 100) + '%';
+      return {
+        kind: 'organ', cat: '补弱点', organ: key,
+        sig: 'organ|' + key,
+        title: '新器官：' + M.name, desc: d + ' · 占 1 槽'
+      };
+    }
+    if (o.lv >= ORGAN_LV_CAP) return null;
+    if (key === 'regen') {
+      return {
+        kind: 'organ', cat: '补弱点', organ: key, sig: 'organ|' + key,
+        title: M.name + ' Lv1→Lv2',
+        desc: '生命上限 +' + REGEN_TABLE[1].maxHp + '，立即回复 ' + REGEN_TABLE[1].heal
+      };
+    }
+    return {
+      kind: 'organ', cat: '补弱点', organ: key, sig: 'organ|' + key,
+      title: M.name + ' Lv1→Lv2',
+      desc: '移速再 +' + Math.round(CILIA_TABLE[1] * 100) + '%'
+    };
+  }
+
+  // 武器安装卡（占 1 槽）：新武器或已解锁但没装的都走这里
+  function installCard(k) {
+    return {
+      kind: 'newskill', cat: '改变路线', skill: k,
+      sig: 'newskill|' + k,
+      title: (skills[k].owned ? '装配：' : '新技能：') + SKILL_META[k].name,
+      desc: '占 1 槽 · ' + (k === 'blade' ? '环绕近战，0.9s 最多切 3 个目标'
+                                       : k === 'arc' ? '弹射连锁，0.8s 最多打 3 个目标'
+                                       : '单体持续输出，0.8s 一发')
+    };
+  }
+
+  // 分支进化入口卡（Lv3 起、耗样本、二选一不可逆）
+  function branchCard() {
+    if (skills.needle.branch) return null;
+    if (skills.needle.lv < BRANCH_MIN_LV) return null;
+    if (samples < BRANCH_SAMPLE_COST) return null;
+    return {
+      kind: 'branch', cat: '改变路线', sig: 'branch',
+      title: '分支进化', desc: '耗 ' + BRANCH_SAMPLE_COST + ' 样本，不可逆二选一'
+    };
+  }
+
+  // 战术调频卡（限时增益，不占槽）：同一时间不重复给同一个增益
+  function tacticCard(t) {
+    if (buffs[t.key] > 0) return null;
+    return {
+      kind: 'tactic', cat: '改变路线', tactic: t.key,
+      sig: 'tactic|' + t.key,
+      title: '战术调频：' + t.name, desc: t.desc + ' · 不占槽'
+    };
+  }
+
   function maxhpCard() {
-    return { kind: 'maxhp', cat: '补弱点', title: '培养皿扩容', desc: '生命上限 +' + HP_CARD_GAIN + '（并回复' + HP_CARD_GAIN + '）' };
+    return { kind: 'maxhp', cat: '补弱点', sig: 'maxhp', title: '培养皿扩容', desc: '生命上限 +' + HP_CARD_GAIN + '（并回复' + HP_CARD_GAIN + '）' };
+  }
+
+  function speedCard() {
+    return { kind: 'speed', cat: '补弱点', sig: 'speed', title: '鞭毛强化', desc: '移速 +15% · 不占槽' };
+  }
+
+  function tacticPool() {
+    const out = [];
+    for (let i = 0; i < TACTIC_DEFS.length; i++) {
+      const c = tacticCard(TACTIC_DEFS[i]);
+      if (c) out.push(c);
+    }
+    return out;
+  }
+
+  // 专精候选池（可重复强化：强化类与兜底类共用）
+  function specializePool(st) {
+    const out = [];
+    for (let i = 0; i < st.owned.length; i++) {
+      const c = specializeCard(st.owned[i]);
+      if (c) out.push(c);
+    }
+    return out;
+  }
+
+  // 强化候选：武器升级 + 可重复专精；未解锁武器按概率混入（不逼玩家提前拿）
+  function strengthenPool(st) {
+    const out = [];
+    const ups = upgradeableSkills();
+    for (let i = 0; i < ups.length; i++) out.push(upgradeCard(ups[i]));
+    if (st.locked.length > 0 && st.canInstall && Math.random() < LOCKED_CHANCE) {
+      const k = st.locked[(Math.random() * st.locked.length) | 0];
+      out.push(installCard(k));
+    }
+    for (let i = 0; i < st.owned.length; i++) {
+      const c = specializeCard(st.owned[i]);
+      if (c) out.push(c);
+    }
+    return out;
+  }
+
+  // 路线候选：分支进化 > 安装未解锁武器 > 生存器官（安装/升级）> 战术调频
+  function routePool(st) {
+    const out = [];
+    const b = branchCard();
+    if (b) out.push(b);
+    for (let i = 0; i < st.locked.length; i++) {
+      if (st.canInstall) out.push(installCard(st.locked[i]));
+    }
+    for (let i = 0; i < ORGAN_ORDER.length; i++) {
+      const key = ORGAN_ORDER[i];
+      const o = organs[key];
+      if (o.owned && o.lv < ORGAN_LV_CAP) out.push(organCard(key));
+      else if (!o.owned && st.canInstall) out.push(organCard(key));
+    }
+    const t = tacticPool();
+    for (let i = 0; i < t.length; i++) out.push(t[i]);
+    return out;
+  }
+
+  // 生存候选（Lv9 前）：生存器官优先——安装占 1 槽，已装的升级不增占位；都不行才用扩容/移速兜底
+  function survivalPool(st) {
+    const out = [];
+    for (let i = 0; i < ORGAN_ORDER.length; i++) {
+      const key = ORGAN_ORDER[i];
+      const o = organs[key];
+      if (o.owned && o.lv < ORGAN_LV_CAP) out.push(organCard(key));   // 升级：不增占位
+      else if (!o.owned && st.canInstall) out.push(organCard(key));    // 安装：占 1 槽
+    }
+    if (out.length === 0) { out.push(maxhpCard()); out.push(speedCard()); }
+    return out;
+  }
+
+  // 第 5 步兜底：只补可重复的专精/扩容/移速，禁止复制同一张生命卡凑数
+  function fallbackPool(st) {
+    const out = [];
+    for (let i = 0; i < st.owned.length; i++) {
+      const c = specializeCard(st.owned[i]);
+      if (c) out.push(c);
+    }
+    if (out.length === 0) { out.push(speedCard()); out.push(maxhpCard()); }
+    return out;
+  }
+
+  function pickOne(list) {
+    if (!list || list.length === 0) return null;
+    return list[(Math.random() * list.length) | 0];
   }
 
   function dealCards() {
     branchMode = false;
     cards = [];
 
-    // 卡1 强化当前构筑：随机一个未满级技能；全满级则转为"过载充能"（类别不变，保证三类齐全）
-    const ups = upgradeableSkills();
-    if (ups.length > 0) {
-      const k = ups[(Math.random() * ups.length) | 0];
-      cards.push({
-        kind: 'upgrade',
-        cat: '强化当前构筑',
-        skill: k,
-        title: SKILL_META[k].name + ' Lv' + skills[k].lv + '→Lv' + (skills[k].lv + 1),
-        desc: '伤害 +25%'
-      });
+    // ① 读玩家状态
+    const st = readPlayerState();
+    // ② 读下一波配置（同一时钟的真实调度数据）。
+    //    按规格 2.3"只给信息、不推荐最优解"，这份画像只用于预告展示，不参与卡池权重。
+    const threat = nextWaveInfo();
+
+    // ③ 三类各生成一张候选 + ④ 移除满级/不可安装/互斥冲突/重复效果
+    const pools = [];
+    if (st.level >= LOOP_POOL_LEVEL) {
+      pools.push(strengthenPool(st));          // 循环池：专精强化为主
+      pools.push(tacticPool());               // 循环池：战术调频
+      pools.push(routePool(st));              // 循环池：互斥进化 / 安装
     } else {
-      cards.push({ kind: 'maxhp', cat: '强化当前构筑', title: '过载充能', desc: '技能已满级，转化为生命上限+30（并回复30）' });
+      const up = [];
+      const ups = upgradeableSkills();
+      for (let i = 0; i < ups.length; i++) up.push(upgradeCard(ups[i]));
+      const sp = specializePool(st);
+      for (let i = 0; i < sp.length; i++) up.push(sp[i]);
+      pools.push(up);                         // 强化当前构筑
+      pools.push(survivalPool(st));           // 补弱点（生存器官）
+      pools.push(routePool(st));              // 改变路线
     }
 
-    // 卡2 补弱点：扩容 / 移速 二选一
-    cards.push(Math.random() < 0.5
-      ? maxhpCard()
-      : { kind: 'speed', cat: '补弱点', title: '鞭毛强化', desc: '移速 +15%' });
-
-    // 卡3 改变路线：分支进化 > 新技能 > 保底扩容
-    if (skills.needle.lv >= BRANCH_MIN_LV && !skills.needle.branch && samples >= BRANCH_SAMPLE_COST) {
-      cards.push({
-        kind: 'branch',
-        cat: '改变路线',
-        title: '🧬 分支进化',
-        desc: '耗' + BRANCH_SAMPLE_COST + '样本，不可逆二选一'
-      });
-    } else {
-      const locked = lockedSkills();
-      if (slotsUsed() < MAX_SLOTS && locked.length > 0) {
-        const k = locked[(Math.random() * locked.length) | 0];
-        cards.push({
-          kind: 'newskill',
-          cat: '改变路线',
-          skill: k,
-          title: '新技能：' + SKILL_META[k].name,
-          desc: '占据1技能槽，' + (k === 'blade' ? '环绕近战' : '弹射连锁')
-        });
-      } else {
-        // 保底：无新路线可选时转为"战术重整"（类别不变，保证三类齐全）
-        cards.push({ kind: 'maxhp', cat: '改变路线', title: '战术重整', desc: '暂无新路线，转化为生命上限+30（并回复30）' });
-      }
+    const used = {};
+    const out = [];
+    for (let c = 0; c < pools.length && out.length < 3; c++) {
+      const card = pickOne(pools[c]);
+      if (card && !used[card.sig]) { used[card.sig] = 1; out.push(card); }
     }
+    // ⑤ 某类耗尽：调用可重复强化补齐（不复制同一张生命卡）
+    const fb = fallbackPool(st);
+    for (let i = 0; i < fb.length && out.length < 3; i++) {
+      if (!used[fb[i].sig]) { used[fb[i].sig] = 1; out.push(fb[i]); }
+    }
+    // 理论上不可达的兜底：保证三张卡的形状完整
+    while (out.length < 3) out.push(maxhpCard());
 
+    cards = out;
+    previewInfo = threat; // 供升级界面顶部预告卡渲染
     layoutCards();
   }
+
+  // 本次发牌时的下一波预告（升级界面顶部预告卡用）
+  let previewInfo = null;
 
   function dealBranchCards() {
     branchMode = true;
     cards = [
-      { kind: 'branchpick', cat: '分支进化', branch: 'rain', title: '针雨协议', desc: '每次射击变扇形3发（±15°），单发伤害不变' },
-      { kind: 'branchpick', cat: '分支进化', branch: 'execute', title: '处决针', desc: '连续命中同一目标叠层，第5发+150%，换目标/目标死亡清零' },
-      { kind: 'back', cat: '返回', title: '再想想', desc: '保留三选一，不消耗样本' }
+      {
+        kind: 'branchpick', cat: '分支进化', branch: 'through', sig: 'branchpick|through',
+        title: '贯通针',
+        desc: '穿透 +2 名敌人，首目标 -10% 伤害（打密集直线群）'
+      },
+      {
+        kind: 'branchpick', cat: '分支进化', branch: 'pierce', sig: 'branchpick|pierce',
+        title: '破甲针',
+        desc: '无视重甲减免，对重甲 +15% 伤害（打精英/重甲）'
+      },
+      { kind: 'back', cat: '返回', sig: 'back', title: '再想想', desc: '保留三选一，不消耗样本' }
     ];
     layoutCards();
   }
 
-  // 卡片纵向排列：逻辑坐标，标题在上、返回键位给分支模式留第三行
+  // 卡片纵向排列：逻辑坐标。顶部 150-230 留给"下一波威胁预告"卡
+  const CARDS_TOP = 236;
   function layoutCards() {
     const totalH = cards.length * CARD_H + (cards.length - 1) * CARD_GAP;
-    const startY = 150 + (LOGICAL_H - 150 - totalH) / 2;
+    const startY = CARDS_TOP + Math.max(0, (LOGICAL_H - CARDS_TOP - 12 - totalH) / 2);
     cardRects.length = 0;
     for (let i = 0; i < cards.length; i++) {
       cardRects.push({
@@ -1106,6 +1541,39 @@
         if (s && s.lv < SKILL_LV_CAP) s.lv++;
         break;
       }
+      case 'specialize': {
+        // 专精：可重复获取，数值按次数衰减 +35% → +8%
+        const k = card.skill;
+        if (!k) break;
+        const add = Math.min(Math.max(SPEC_FLOOR, SPEC_FIRST * Math.pow(SPEC_FALLOFF, specCount[k])),
+                             SPEC_CAP - skillBonus[k]);
+        skillBonus[k] += add;
+        specCount[k]++;
+        break;
+      }
+      case 'organ': {
+        // 生存器官：Lv1 即时兑现（回血/移速），占 1 槽；同一机能只允许一个实例
+        const o = organs[card.organ];
+        if (!o) break;
+        if (!o.owned) { o.owned = true; o.lv = 1; }
+        else if (o.lv < ORGAN_LV_CAP) o.lv++;
+        else break;
+        if (card.organ === 'regen') {
+          const d = REGEN_TABLE[o.lv - 1];
+          player.maxHp += d.maxHp;
+          player.hp = Math.min(player.maxHp, player.hp + d.heal); // 立刻回血：解决"现在可能死"
+        } else {
+          speedMult *= 1 + CILIA_TABLE[o.lv - 1]; // 移速累乘：Lv1 +15%、Lv2 再 +8%
+        }
+        break;
+      }
+      case 'tactic': {
+        // 战术调频：限时增益，不占槽
+        for (let i = 0; i < TACTIC_DEFS.length; i++) {
+          if (TACTIC_DEFS[i].key === card.tactic) buffs[card.tactic] = TACTIC_DEFS[i].dur;
+        }
+        break;
+      }
       case 'maxhp':
         player.maxHp += HP_CARD_GAIN;
         player.hp = Math.min(player.maxHp, player.hp + HP_CARD_GAIN);
@@ -1114,15 +1582,18 @@
         speedMult *= SPEED_CARD_MULT;
         break;
       case 'newskill': {
+        // 槽满时不再允许安装新机能（只开放升级/进化）
+        if (slotsUsed() >= MAX_SLOTS) break;
         const s = skills[card.skill];
+        if (!s || s.owned) break;
         s.owned = true;
         s.lv = 1;
         pushToast('获得新技能：' + SKILL_META[card.skill].name);
         break;
       }
       case 'branchpick':
-        // 不可逆：branch 只在为空时写入，重复选择无效
-        if (!skills.needle.branch) {
+        // 不可逆：branch 只在为空时写入，重复选择无效（本局不可兼得）
+        if (!skills.needle.branch && samples >= BRANCH_SAMPLE_COST) {
           samples -= BRANCH_SAMPLE_COST;
           skills.needle.branch = card.branch;
           pushToast('分支进化：' + card.title);
@@ -1178,6 +1649,42 @@
     '返回': '#8F7DAA',                      // 弱化灰
   };
 
+  // ===== 下一波威胁预告卡（升级界面顶部，P2 规格 2.3）=====
+  // 数据来自 WaveDirector 的真实调度（nextWaveInfo），只给信息、不推荐最优解
+  function drawThreatPreviewCard() {
+    if (branchMode || !previewInfo) return;
+    const x = (LOGICAL_W - CARD_W) / 2, y = 146, h = 82;
+    const info = previewInfo;
+    const p = info.profile;
+
+    ctx.fillStyle = 'rgba(20,32,48,0.92)';
+    roundRect(x, y, CARD_W, h, 10);
+    ctx.fill();
+    ctx.strokeStyle = '#FF7A1A';
+    ctx.lineWidth = 1.5;
+    roundRect(x, y, CARD_W, h, 10);
+    ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = UI_TEXT_MUT;
+    ctx.font = 'bold 9px ui-monospace, monospace';
+    ctx.fillText('下一波威胁预告', x + 12, y + 15);
+
+    ctx.fillStyle = COLOR_WHITE;
+    ctx.font = 'bold 14px ui-monospace, monospace';
+    const label = info.label + (info.round > 0 ? '·第' + (info.round + 1) + '轮' : '') +
+                  ' · ' + info.name + '（' + Math.ceil(info.remain) + '秒后）';
+    ctx.fillText(label, x + 12, y + 36);
+
+    ctx.fillStyle = ENEMY_KINDS[p.kind].color;
+    ctx.font = 'bold 11px ui-monospace, monospace';
+    ctx.fillText(ENEMY_KINDS[p.kind].name + '占比约' + p.ratio + '%', x + 12, y + 54);
+
+    ctx.fillStyle = UI_TEXT_DIM;
+    ctx.font = '10px ui-monospace, monospace';
+    drawWrapText(p.tags.join(' · '), x + 12, y + 70, CARD_W - 24, 12);
+  }
+
   function drawLevelUpUI() {
     if (!uiOpen) return;
     ctx.save();
@@ -1189,7 +1696,9 @@
     ctx.fillStyle = COLOR_WHITE;
     ctx.font = 'bold 17px ui-monospace, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText(branchMode ? '分支进化 · 不可逆' : 'Lv.' + playerLevel + ' 升级！三选一', LOGICAL_W / 2, 132);
+    ctx.fillText(branchMode ? '分支进化 · 不可逆' : 'Lv.' + playerLevel + ' 升级！三选一', LOGICAL_W / 2, 126);
+
+    drawThreatPreviewCard();
 
     for (let i = 0; i < cardRects.length; i++) {
       const r = cardRects[i];
@@ -1219,7 +1728,9 @@
 
       // 技能名（强化卡按技能色）
       ctx.font = 'bold 17px ui-monospace, monospace';
-      ctx.fillStyle = (card.skill && SKILL_META[card.skill]) ? SKILL_META[card.skill].color : COLOR_WHITE;
+      const meta = (card.skill && SKILL_META[card.skill]) ? SKILL_META[card.skill]
+                  : (card.organ ? ORGAN_META[card.organ] : null);
+      ctx.fillStyle = meta ? meta.color : COLOR_WHITE;
       ctx.fillText(card.title, r.x + 14, r.y + 56);
 
       // 说明（长文本折行）
@@ -1230,7 +1741,7 @@
     ctx.restore();
   }
 
-  // ============================================================
+// ============================================================
   // 规范 UI §7–§9：暂停面板 / 死亡结算 / 战斗提示条（+ UI 状态机）
   // 坐标换算：设计稿基准 1080×1920，本作逻辑画布 360×640 → 统一 ÷3。
   // 下面每个几何常量后面标注了 1080 基准坐标，方便与 ui-spec-v1.0.md 对照。
@@ -1569,16 +2080,28 @@
     skills.needle.owned = true; skills.needle.lv = 1; skills.needle.branch = null;
     skills.blade.owned = false; skills.blade.lv = 0; skills.blade.branch = null;
     skills.arc.owned = false; skills.arc.lv = 0; skills.arc.branch = null;
+    // P2 生存器官（各占 1 槽）：重开必须清空，否则槽位与增益会跨局残留
+    organs.regen.owned = false; organs.regen.lv = 0;
+    organs.cilia.owned = false; organs.cilia.lv = 0;
+    // P2 专精累计与战术调频倒计时：清零（否则下一局伤害/受击带着上一局的加成）
+    for (const k in skillBonus) skillBonus[k] = 0;
+    for (const k in specCount) specCount[k] = 0;
+    for (const k in buffs) buffs[k] = 0;
     playerLevel = 1; playerXp = 0; xpNext = XP_STEP; pendingLevels = 0;
     samples = 0; runSamples = 0; killCount = 0; elapsed = 0;
-    speedMult = 1; execTarget = null; execCount = 0;
+    speedMult = 1;
+    // 波次调度：i 回 -1 哨兵值，下一帧 updateWaveDirector 会 beginWave 重建 W1
+    waveNow.i = -1; waveNow.round = 0; waveNow.phase = 'preview';
+    waveNow.cursor = 0; waveNow.lastSpawnAt = -99;
+    waveNow.spawned = 0; waveNow.dropped = 0;
     needleCd = NEEDLE_CD; arcCd = ARC_CD; bladeAngle = 0;
     for (let i = 0; i < needles.length; i++) needles[i].active = false;
     for (let i = 0; i < arcs.length; i++) arcs[i].life = 0;
     for (let i = 0; i < particles.length; i++) particles[i].life = 0;
     for (let i = 0; i < dmgNums.length; i++) dmgNums[i].life = 0;
     for (let i = 0; i < samples_pool.length; i++) samples_pool[i].active = false;
-    for (let i = 0; i < enemies.length; i++) respawnEnemy(enemies[i], i);
+    // P2：敌人由 WaveDirector 动态投放（不再是固定池），重开直接清空数组
+    enemies.length = 0;
     uiOpen = false; branchMode = false;
     paused = false; dead = false; confirmRestart = false;
     toastQueue.length = 0; toast = null;
@@ -1586,57 +2109,95 @@
     clearStick();
   }
 
-  // ===== 槽位 UI（左上 2x2 网格，霓虹发光描边）=====
+  // ===== 槽位 UI（左上 3x2 网格，霓虹发光描边）=====
+  // P2：候选机能 5 种（3 武器 + 2 生存器官），但只有 MAX_SLOTS=4 个槽位，
+  // 已装的按 SLOT_ORDER 顺序靠前排，剩余格显示"空"（= 还能再装 1 个）。
   function drawSlots() {
-    const x0 = 10, y0 = 44, gap = 6; // 下移，给顶部条让位
-    const S = 34;
+    const x0 = 8, y0 = 44, gap = 5; // 下移，给顶部条让位
+    const S = 30, COLS = 3, ROWS = 2;
+    const CELLS = COLS * ROWS;
+    // 已装机能列表（武器在前，器官在后）
+    const filled = [];
+    for (let i = 0; i < SLOT_ORDER.length; i++) {
+      const k = SLOT_ORDER[i];
+      const owned = (k === 'regen' || k === 'cilia') ? organs[k].owned : skills[k].owned;
+      if (owned) filled.push(k);
+    }
     ctx.save();
     ctx.textAlign = 'center';
-    for (let i = 0; i < MAX_SLOTS; i++) {
-      const col = i % 2, row = (i / 2) | 0;
+    for (let i = 0; i < CELLS; i++) {
+      const col = i % COLS, row = (i / COLS) | 0;
       const x = x0 + col * (S + gap), y = y0 + row * (S + gap);
-      const key = SKILL_ORDER[i];
-      const s = key ? skills[key] : null;
-      if (s && s.owned) {
-        const sc = SKILL_META[key].color;
+      const key = filled[i];
+      if (key) {
+        const isOrgan = (key === 'regen' || key === 'cilia');
+        const meta = isOrgan ? ORGAN_META[key] : SKILL_META[key];
+        const st = isOrgan ? organs[key] : skills[key];
+        const sc = meta.color;
         ctx.fillStyle = UI_PANEL;
-        roundRect(x, y, S, S, 9);
+        roundRect(x, y, S, S, 8);
         ctx.fill();
         ctx.strokeStyle = sc;
         ctx.lineWidth = 2;
         ctx.shadowColor = sc;
         ctx.shadowBlur = 9;
-        roundRect(x, y, S, S, 9);
+        roundRect(x, y, S, S, 8);
         ctx.stroke();
         ctx.shadowBlur = 0;
         // 技能图标（有图画图，无图画文字）
-        const icon = SKILL_ICONS[key];
+        const icon = isOrgan ? null : SKILL_ICONS[key];
         if (icon && icon.complete && icon.naturalWidth > 0) {
-          const isz = 22;
-          ctx.drawImage(icon, x + (S - isz) / 2, y + 3, isz, isz);
+          const isz = 19;
+          ctx.drawImage(icon, x + (S - isz) / 2, y + 2, isz, isz);
         } else {
           ctx.fillStyle = sc;
-          ctx.font = 'bold 14px ui-monospace, monospace';
-          ctx.fillText(SKILL_META[key].short, x + S / 2, y + 17);
+          ctx.font = 'bold 13px ui-monospace, monospace';
+          ctx.fillText(meta.short, x + S / 2, y + 16);
         }
         ctx.fillStyle = COLOR_WHITE;
         ctx.font = 'bold 9px ui-monospace, monospace';
-        ctx.fillText('Lv' + s.lv, x + S / 2, y + 31);
-        if (s.branch) {
+        ctx.fillText('Lv' + st.lv, x + S / 2, y + 27);
+        if (!isOrgan && st.branch) {
           ctx.fillStyle = COLOR_SAMPLE;
           ctx.font = 'bold 9px ui-monospace, monospace';
-          ctx.fillText('*', x + S - 6, y + 11);
+          ctx.fillText('*', x + S - 5, y + 10);
         }
       } else {
         ctx.strokeStyle = 'rgba(143,125,170,0.35)';
         ctx.lineWidth = 1.2;
-        roundRect(x, y, S, S, 9);
+        roundRect(x, y, S, S, 8);
         ctx.stroke();
         ctx.fillStyle = 'rgba(143,125,170,0.4)';
         ctx.font = '9px ui-monospace, monospace';
-        ctx.fillText('空', x + S / 2, y + 20);
+        ctx.fillText('空', x + S / 2, y + 18);
       }
     }
+    ctx.restore();
+  }
+
+  // ===== 下一波预告 HUD（底部胶囊：波名 + 倒计时，真实调度数据）=====
+  function drawWavePreviewHud() {
+    const info = nextWaveInfo();
+    const label = '下一波 ' + info.label + ' ' + info.name + ' · ' + Math.ceil(info.remain) + 's';
+    ctx.save();
+    ctx.font = 'bold 11px ui-monospace, monospace';
+    const w = ctx.measureText(label).width + 20;
+    const x = (LOGICAL_W - w) / 2, y = LOGICAL_H - 30;
+    ctx.fillStyle = UI_PANEL;
+    roundRect(x, y, w, 20, 10);
+    ctx.fill();
+    // 剩 10 秒内转红：给"要开打"的直觉信号
+    const hot = info.remain <= 10;
+    ctx.strokeStyle = hot ? '#FF4D6D' : '#FF7A1A';
+    ctx.lineWidth = 1.2;
+    ctx.shadowColor = ctx.strokeStyle;
+    ctx.shadowBlur = 6;
+    roundRect(x, y, w, 20, 10);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = hot ? '#FF8FA3' : UI_TEXT_DIM;
+    ctx.textAlign = 'center';
+    ctx.fillText(label, x + w / 2, y + 14);
     ctx.restore();
   }
 
@@ -1916,16 +2477,20 @@
 
   // ===== 程序绘制：感染细胞敌人（预渲染精灵版，每帧只做 drawImage + 蠕动缩放）=====
   function drawEnemy(e, t) {
-    if (!e.alive) return;          // 死亡帧不绘制（重生前是"空位"）
+    if (!e.alive) return;          // 死亡后是"空位"（不补位）
     const wob = 1 + Math.sin(t * 4.5 * e.wobble + e.seed) * 0.09;
     const half = 24; // 精灵对应 48 逻辑像素
+    // CLEANUP 退场：向外撤离的同时淡出
+    const fade = e.retreating ? Math.max(0, e.fadeT / CLEANUP_FADE) : 1;
+    if (fade <= 0) return;
     ctx.save();
+    if (fade < 1) ctx.globalAlpha = fade;
     ctx.translate(e.x, e.y);
     ctx.scale(wob, wob);
     ctx.drawImage(e.sprite, -half, -half, half * 2, half * 2);
     // 受击白闪：叠一层纯白版精灵，alpha 随 flash 线性衰减
     if (e.flash > 0) {
-      ctx.globalAlpha = Math.min(1, e.flash / FLASH_TIME);
+      ctx.globalAlpha = Math.min(1, e.flash / FLASH_TIME) * fade;
       ctx.drawImage(e.spriteWhite, -half, -half, half * 2, half * 2);
       ctx.globalAlpha = 1;
     }
@@ -2041,6 +2606,8 @@
     } else if (isBattleFrozen()) {
       // 升级 / 进化 / 暂停 / 死亡：elapsed 与全部战斗逻辑一起冻结，
       // 但 draw() 照常跑（战场定格在模态面板下）。Toast 显示时间同样不消耗。
+      // 冻结 elapsed 即冻结 WaveDirector 时钟（预告倒计时随之暂停，
+      // 保证"预告用真实调度数据"：玩家看到的秒数就是实际还要打的秒数）
       stopped = true;
     } else {
       elapsed += dt;
@@ -2071,12 +2638,17 @@
     // 模态期间冻结整个逻辑更新（战场静止，避免边选卡边挨打 / 暂停时偷跑）
     if (isBattleFrozen()) return;
 
-    // —— 玩家移动（摇杆归一化方向 × 移速 × 构筑移速乘区）——
+    // —— WaveDirector：唯一的出怪入口（同一时钟 elapsed，硬规则 6）——
+    updateWaveDirector();
+    // 摘除已消失的个体（死亡淡出结束 / 退场结束）：倒序换位，不打断迭代
+    compactEnemies(dt);
+
+    // —— 玩家移动（摇杆归一化方向 × 移速 × 构筑移速乘区 × 战术调频）——
     {
       const moveLen = Math.hypot(stick.x, stick.y);
       if (moveLen > 0.001) {
-        player.x += stick.x * PLAYER_SPEED * speedMult * dt;
-        player.y += stick.y * PLAYER_SPEED * speedMult * dt;
+        player.x += stick.x * PLAYER_SPEED * speedMult * buffHaste() * dt;
+        player.y += stick.y * PLAYER_SPEED * speedMult * buffHaste() * dt;
       }
     }
     clampToBounds(player, player.size / 2, player.size / 2);
@@ -2086,6 +2658,9 @@
     if (player.invuln > 0) player.invuln -= dt;
     if (player.hurtFlash > 0) player.hurtFlash -= dt;
 
+    // 战术调频倒计时
+    for (const k in buffs) if (buffs[k] > 0) buffs[k] = Math.max(0, buffs[k] - dt);
+
     // —— 敌人追踪：瞄准玩家周围的包围点（形成环绕，而非堆叠在玩家身上）——
     // 分离力两阶段计算：先算完所有推力再统一施加，避免"后算的外层循环覆盖先算的结果"
     for (let i = 0; i < enemies.length; i++) {
@@ -2094,10 +2669,10 @@
     }
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
-      if (!e.alive) continue; // 死亡敌人不参与分离
+      if (!e.alive || e.retreating) continue; // 死亡/退场敌人不参与分离
       for (let j = i + 1; j < enemies.length; j++) {
         const o = enemies[j];
-        if (!o.alive) continue;
+        if (!o.alive || o.retreating) continue;
         const ox = e.x - o.x;
         const oy = e.y - o.y;
         const od = Math.hypot(ox, oy);
@@ -2113,15 +2688,21 @@
     }
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
-      // 死亡：不动、不索敌，只走重生倒计时；时间到了回屏幕边缘满血回来
-      if (!e.alive) {
-        e.respawnT -= dt;
-        if (e.respawnT <= 0) respawnEnemy(e, i);
-        continue;
-      }
+      if (!e.alive) continue; // 已死个体只等 compactEnemies 摘除，不再重生（硬规则 1）
       // 受击白闪 / 刀刃受击间隔计时（钳到 0，避免子步进残留负值）
       if (e.flash > 0) e.flash = Math.max(0, e.flash - dt);
       if (e.bladeCd > 0) e.bladeCd = Math.max(0, e.bladeCd - dt);
+
+      // CLEANUP 退场：不索敌、不咬人、无经验无掉落，只向外撤离并淡出（硬规则 5）
+      if (e.retreating) {
+        const rx = e.x - player.x, ry = e.y - player.y;
+        const rd = Math.hypot(rx, ry) || 1;
+        e.x += (rx / rd) * e.speed * 2.2 * dt;
+        e.y += (ry / rd) * e.speed * 2.2 * dt;
+        e.fadeT -= dt;
+        if (e.fadeT <= 0) { e.fadeT = 0; e.alive = false; }
+        continue;
+      }
 
       const tx = player.x + Math.cos(e.seed) * e.orbitR;
       const ty = player.y + Math.sin(e.seed) * e.orbitR;
@@ -2142,13 +2723,15 @@
         e.x = player.x + qx / qd * minD;
         e.y = player.y + qy / qd * minD;
       }
-      // 接触伤害：怪贴住主角就咬（0.45s 无敌帧），伤害按种类
+      // 接触伤害：怪贴住主角就咬（0.45s 无敌帧），伤害按种类，受代谢抑制影响
+      // dead 期间不再判伤（死亡已冻结战场，结算面板接管）
       if (qd < minD + 4 && player.invuln <= 0 && !dead) {
-        player.hp -= e.touchDmg;
+        const dmg = e.touchDmg * buffGuard();
+        player.hp -= dmg;
         player.invuln = INVOKED_IFRAME;
         player.hurtFlash = 0.3;
         shake = Math.min(shake + 3, 8);
-        spawnDmgNum(player.x, player.y - 10, e.touchDmg);
+        spawnDmgNum(player.x, player.y - 10, dmg);
         if (player.hp <= 0) {
           // 死亡即本局结束：冻结战场 + 结算面板（不再原地复活）
           player.hp = 0;
@@ -2222,10 +2805,11 @@
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     drawStick(dtForStick());
 
-    // 构筑 HUD：左上槽位 + 右上样本计数 + 右上角暂停按钮
+    // 构筑 HUD：左上槽位 + 右上样本计数 + 右上角暂停按钮 + 底部下一波预告
     drawSlots();
     drawSampleCount();
     drawPauseButton();
+    drawWavePreviewHud();
 
     // 血条（顶部居中，霓虹样式）
     const hbW = 120, hbH = 10, hbX = (LOGICAL_W - hbW) / 2, hbY = 10;
@@ -2330,6 +2914,7 @@
     frame(now);
   });
 })();
+
 </script>
 </body>
 </html>
