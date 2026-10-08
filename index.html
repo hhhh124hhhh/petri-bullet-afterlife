@@ -143,7 +143,7 @@
   const SAMPLE_PICK_R = 24;         // 样本拾取半径
   const SAMPLE_R = 4;               // 样本绘制半径
   const CARD_W = 300;               // 三选一卡片宽
-  const CARD_H = 92;                // 三选一卡片高
+  const CARD_H = 108;               // 三选一卡片高（加高，信息分层）
   const CARD_GAP = 16;              // 卡片间距
   const SLOT_UI_SIZE = 30;          // 技能槽格子边长
 
@@ -1194,64 +1194,68 @@
       // 类别胶囊标签
       ctx.textAlign = 'left';
       ctx.font = 'bold 10px ui-monospace, monospace';
-      const catW = ctx.measureText(card.cat).width + 12;
+      const catW = ctx.measureText(card.cat).width + 14;
       ctx.fillStyle = catColor;
-      roundRect(r.x + 12, r.y + 8, catW, 16, 8);
+      roundRect(r.x + 14, r.y + 10, catW, 18, 9);
       ctx.fill();
       ctx.fillStyle = '#1A0B2E';
-      ctx.fillText(card.cat, r.x + 18, r.y + 20);
+      ctx.fillText(card.cat, r.x + 21, r.y + 23);
 
       // 技能名（强化卡按技能色）
-      ctx.font = 'bold 16px ui-monospace, monospace';
+      ctx.font = 'bold 17px ui-monospace, monospace';
       ctx.fillStyle = (card.skill && SKILL_META[card.skill]) ? SKILL_META[card.skill].color : COLOR_WHITE;
-      ctx.fillText(card.title, r.x + 12, r.y + 48);
+      ctx.fillText(card.title, r.x + 14, r.y + 56);
 
       // 说明（长文本折行）
-      ctx.font = '11px ui-monospace, monospace';
+      ctx.font = '12px ui-monospace, monospace';
       ctx.fillStyle = UI_TEXT_DIM;
-      drawWrapText(card.desc, r.x + 12, r.y + 68, r.w - 24, 14);
+      drawWrapText(card.desc, r.x + 14, r.y + 78, r.w - 28, 15);
     }
     ctx.restore();
   }
 
-  // ===== 槽位 UI（左上角 4 格，霓虹发光描边）=====
+  // ===== 槽位 UI（左上 2x2 网格，霓虹发光描边）=====
   function drawSlots() {
-    const x0 = 8, y0 = 8, gap = 4;
+    const x0 = 10, y0 = 44, gap = 6; // 下移，给顶部条让位
+    const S = 34;
     ctx.save();
     ctx.textAlign = 'center';
     for (let i = 0; i < MAX_SLOTS; i++) {
-      const x = x0 + i * (SLOT_UI_SIZE + gap);
+      const col = i % 2, row = (i / 2) | 0;
+      const x = x0 + col * (S + gap), y = y0 + row * (S + gap);
       const key = SKILL_ORDER[i];
       const s = key ? skills[key] : null;
       if (s && s.owned) {
         const sc = SKILL_META[key].color;
         ctx.fillStyle = UI_PANEL;
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
+        roundRect(x, y, S, S, 9);
         ctx.fill();
         ctx.strokeStyle = sc;
         ctx.lineWidth = 2;
         ctx.shadowColor = sc;
-        ctx.shadowBlur = 8;
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
+        ctx.shadowBlur = 9;
+        roundRect(x, y, S, S, 9);
         ctx.stroke();
         ctx.shadowBlur = 0;
         ctx.fillStyle = sc;
-        ctx.font = 'bold 13px ui-monospace, monospace';
-        ctx.fillText(SKILL_META[key].short, x + SLOT_UI_SIZE / 2, y0 + 15);
+        ctx.font = 'bold 14px ui-monospace, monospace';
+        ctx.fillText(SKILL_META[key].short, x + S / 2, y + 17);
         ctx.fillStyle = COLOR_WHITE;
-        ctx.font = 'bold 8px ui-monospace, monospace';
-        ctx.fillText('Lv' + s.lv, x + SLOT_UI_SIZE / 2, y0 + 27);
-        // 分支进化标记
+        ctx.font = 'bold 9px ui-monospace, monospace';
+        ctx.fillText('Lv' + s.lv, x + S / 2, y + 29);
         if (s.branch) {
           ctx.fillStyle = COLOR_SAMPLE;
           ctx.font = 'bold 9px ui-monospace, monospace';
-          ctx.fillText('*', x + SLOT_UI_SIZE - 5, y0 + 10);
+          ctx.fillText('*', x + S - 6, y + 11);
         }
       } else {
         ctx.strokeStyle = 'rgba(143,125,170,0.35)';
         ctx.lineWidth = 1.2;
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
+        roundRect(x, y, S, S, 9);
         ctx.stroke();
+        ctx.fillStyle = 'rgba(143,125,170,0.4)';
+        ctx.font = '9px ui-monospace, monospace';
+        ctx.fillText('空', x + S / 2, y + 20);
       }
     }
     ctx.restore();
