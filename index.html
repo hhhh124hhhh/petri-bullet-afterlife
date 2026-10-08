@@ -72,9 +72,9 @@
   // normal 感染体：均衡；swift 疾行体：快/脆/咬轻，遛不掉，优先点杀；
   // armored 重甲体：慢/硬/咬重，经验多，"打不打它"本身是决策
   const ENEMY_KINDS = {
-    normal:  { speed: 110, hp: 35,  touch: 6,  size: 16, color: '#E8823C', xp: 1, samples: 1, weight: 8 },
-    swift:   { speed: 140, hp: 20,  touch: 4,  size: 12, color: '#D8E83C', xp: 1, samples: 1, weight: 4 },
-    armored: { speed: 70,  hp: 120, touch: 10, size: 22, color: '#B45BE0', xp: 3, samples: 2, weight: 2 },
+    normal:  { speed: 60, hp: 35,  touch: 6,  size: 16, color: '#E8823C', xp: 1, samples: 1, weight: 8 },
+    swift:   { speed: 90, hp: 20,  touch: 4,  size: 12, color: '#D8E83C', xp: 1, samples: 1, weight: 4 },
+    armored: { speed: 45, hp: 120, touch: 10, size: 22, color: '#B45BE0', xp: 3, samples: 2, weight: 2 },
   };
   const KIND_KEYS = ['normal', 'swift', 'armored'];
   function rollKind() {
