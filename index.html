@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>培养皿：弹幕余生 — Prototype 1（战斗爽感验证）</title>
+<title>培养皿：弹幕余生</title>
 <style>
   /* 页面深色背景，Canvas 居中铺满视口 */
   html, body {
@@ -67,6 +67,7 @@
   const INVOKED_IFRAME = 0.45; // 无敌帧时长（秒）
   const ENEMY_R = ENEMY_SIZE / 2; // 敌人逻辑半径（碰撞用）
   const PLAYER_R = 12; // 主角逻辑半径（size 24 / 2；怪不许叠进人的推开距离用）
+  const BASE_HP = 100;        // 一局初始生命上限（重开时回滚到该值）
 
   // ===== 敌人种类（P2 决策测试：不同怪需要不同解法）=====
   // normal 感染体：均衡；swift 疾行体：快/脆/咬轻，遛不掉，优先点杀；
@@ -255,9 +256,9 @@
     size: 24,
     invuln: 0,     // 剩余无敌时间
     animTime: 0,   // 浮动动画计时
-    hp: 100, maxHp: 100, // 生命（P1：怪有接触伤害了，主角得有血条）
-    hurtFlash: 0,  // 受击红闪计时
-    deadT: 0       // 死亡复活倒计时（P1 极简：1.2s 后原地满血复活，不做结算）
+    hp: BASE_HP, maxHp: BASE_HP, // 生命（P1：怪有接触伤害了，主角得有血条）
+    hurtFlash: 0   // 受击红闪计时
+    // 注：不再有 deadT。死亡 = 冻结 + 死亡结算面板（见 UIState.DEAD）
   };
   const ENEMY_TOUCH_DMG = 6; // 怪接触伤害
 
@@ -268,10 +269,12 @@
     blade:  { owned: false, lv: 0, branch: null },
     arc:    { owned: false, lv: 0, branch: null }
   };
+  // 技能主题色（美术 issue：刃=霓虹橙、弧=霓虹紫；针保持青）
+  // icon 指向 assets/icons/*.png；图片缺失时绘制侧回退到 short 文字（见 drawSlots）
   const SKILL_META = {
     needle: { name: '脉冲针', short: '针', color: '#38E8E0', icon: 'assets/icons/needle.png' },
-    blade:  { name: '离心刃', short: '刃', color: '#7EB6FF', icon: null },
-    arc:    { name: '培养电弧', short: '弧', color: '#B98CFF', icon: null }
+    blade:  { name: '离心刃', short: '刃', color: '#FF7A1A', icon: 'assets/icons/blade.png' },
+    arc:    { name: '培养电弧', short: '弧', color: '#B45BE0', icon: 'assets/icons/arc.png' }
   };
   // 生存器官（P2 规格 2.4）：各占 1 槽，同一机能只允许一个实例
   const ORGAN_META = {
@@ -299,9 +302,15 @@
   let uiOpen = false;     // 三选一 UI 打开：update 冻结、摇杆输入忽略
   let branchMode = false; // 分支子选择中（两张分支卡 + 返回）
   let speedMult = 1;      // 移速乘区（运动纤毛 / 鞭毛强化共用）
+  // —— 一局统计（死亡结算面板读取，冻结后不再变化）——
+  let killCount = 0;      // 本局击杀数
+  let runSamples = 0;     // 本局累计拾取样本数（只增不减；samples 是可消耗余额）
+  // —— P2 构筑决策 A-E 运行时状态（重开时必须一并清零）——
   const skillBonus = { needle: 0, blade: 0, arc: 0 };   // 专精累计加成（可重复获取）
   const specCount = { needle: 0, blade: 0, arc: 0 };     // 专精获取次数（决定数值衰减）
   const buffs = { overload: 0, haste: 0, guard: 0 };     // 战术调频剩余时间（秒）
+  let allDmgBonus = 0;      // 过载超频累计（全武器伤害 +N%，可重复）
+  let xpMult = 1;           // 战术重整经验乘区（本次战斗 +10%，可重复）
 
   // ===== 敌人集合 =====
   // P2：不再有"恒定 14 只"的固定池。数组由 WaveDirector 投放 push、
@@ -758,7 +767,8 @@
     if (e.hp <= 0) {
       e.alive = false;
       e.hp = 0;
-      e.fadeT = DEATH_FADE; // 死亡不补位（硬规则 1）：只保留一小段淡出后摘除
+e.fadeT = DEATH_FADE; // 死亡不补位（硬规则 1）：只保留一小段淡出后摘除
+      killCount++;                 // 结算面板"击杀"统计
       spawnDeathBurst(e.x, e.y);
       // 40ms 微顿：连续死亡不断刷新为 0.04s，手感上就是"一串黏住的顿"
       hitStop = HIT_STOP;
@@ -940,7 +950,7 @@
     g.strokeStyle = COLOR_OUTLINE;
     g.lineWidth = 3.2;
     g.stroke();
-    g.fillStyle = COLOR_PLAYER;
+    g.fillStyle = SKILL_META.blade.color; // 美术 issue：刃=霓虹橙
     g.fill();
     // 刃口高光
     g.strokeStyle = COLOR_WHITE;
@@ -1106,9 +1116,9 @@
       ctx.save();
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
-      // 宽的低透明青色光晕
+      // 宽的低透明紫色光晕（美术 issue：弧=霓虹紫）
       ctx.globalAlpha = 0.3 * k;
-      ctx.strokeStyle = COLOR_PLAYER;
+      ctx.strokeStyle = SKILL_META.arc.color;
       ctx.lineWidth = 7;
       strokeArcPath(a);
       // 细的高亮白线
@@ -1138,13 +1148,13 @@
   // 战术调频增益：代谢抑制（受击伤害 -35%）
   function buffGuard() { return buffs.guard > 0 ? 1 - 0.35 : 1; }
 
-  function needleDmg() { return NEEDLE_DMG_TABLE[lvIdx(skills.needle.lv, NEEDLE_DMG_TABLE.length)] * (1 + skillBonus.needle) * buffDmg(); }
-  function bladeDmg() { return BLADE_DMG_TABLE[lvIdx(skills.blade.lv, BLADE_DMG_TABLE.length)] * (1 + skillBonus.blade) * buffDmg(); }
-  function arcDmg() { return ARC_DMG_TABLE[lvIdx(skills.arc.lv, ARC_DMG_TABLE.length)] * (1 + skillBonus.arc) * buffDmg(); }
+  function needleDmg() { return NEEDLE_DMG_TABLE[lvIdx(skills.needle.lv, NEEDLE_DMG_TABLE.length)] * (1 + skillBonus.needle) * (1 + allDmgBonus) * buffDmg(); }
+  function bladeDmg() { return BLADE_DMG_TABLE[lvIdx(skills.blade.lv, BLADE_DMG_TABLE.length)] * (1 + skillBonus.blade) * (1 + allDmgBonus) * buffDmg(); }
+  function arcDmg() { return ARC_DMG_TABLE[lvIdx(skills.arc.lv, ARC_DMG_TABLE.length)] * (1 + skillBonus.arc) * (1 + allDmgBonus) * buffDmg(); }
 
   // ===== 经验与升级 =====
   function gainXp(n) {
-    playerXp += n;
+    playerXp += n * xpMult;
     while (playerXp >= xpNext) {
       playerXp -= xpNext;
       playerLevel++;
@@ -1156,11 +1166,7 @@
   function openLevelUp() {
     uiOpen = true;
     branchMode = false;
-    // 摇杆清零：否则松开事件晚到会让角色在选卡期间继续走
-    stick.x = 0;
-    stick.y = 0;
-    stick.active = false;
-    stick.pointerId = null;
+    clearStick(); // 摇杆清零：否则松开事件晚到会让角色在选卡期间继续走
     dealCards();
   }
 
@@ -1185,6 +1191,7 @@
       if (dx * dx + dy * dy <= SAMPLE_PICK_R2) {
         s.active = false;
         samples++;
+        runSamples++;               // 结算面板"累计采样"统计（与可消耗余额分开记）
         // 复用火花池做一小簇绿色反馈
         for (let k = 0; k < 3; k++) {
           const a = Math.random() * Math.PI * 2;
@@ -1362,6 +1369,12 @@
     return { kind: 'speed', cat: '补弱点', sig: 'speed', title: '鞭毛强化', desc: '移速 +15% · 不占槽' };
   }
 
+  // 可重复兜底卡：强化类槽位枯竭时补位，类别始终是「强化当前构筑」
+  function overclockCard() { return { kind: "overclock", cat: "强化当前构筑", sig: "overclock", title: "过载超频", desc: "全武器伤害 +8% · 可重复" }; }
+
+  // 可重复兜底卡：路线类槽位枯竭时补位，类别始终是「改变路线」
+  function tacticResetCard() { return { kind: "tacticreset", cat: "改变路线", sig: "tacticreset", title: "战术重整", desc: "回复 15 点生命，本次战斗经验 +10% · 可重复 · 不占槽" }; }
+
   function tacticPool() {
     const out = [];
     for (let i = 0; i < TACTIC_DEFS.length; i++) {
@@ -1381,15 +1394,11 @@
     return out;
   }
 
-  // 强化候选：武器升级 + 可重复专精；未解锁武器按概率混入（不逼玩家提前拿）
+  // 强化候选：武器升级 + 可重复专精；只属于「强化当前构筑」一类
   function strengthenPool(st) {
     const out = [];
     const ups = upgradeableSkills();
     for (let i = 0; i < ups.length; i++) out.push(upgradeCard(ups[i]));
-    if (st.locked.length > 0 && st.canInstall && Math.random() < LOCKED_CHANCE) {
-      const k = st.locked[(Math.random() * st.locked.length) | 0];
-      out.push(installCard(k));
-    }
     for (let i = 0; i < st.owned.length; i++) {
       const c = specializeCard(st.owned[i]);
       if (c) out.push(c);
@@ -1397,19 +1406,13 @@
     return out;
   }
 
-  // 路线候选：分支进化 > 安装未解锁武器 > 生存器官（安装/升级）> 战术调频
+  // 路线候选：分支进化 > 安装未解锁武器 > 战术调频；只属于「改变路线」一类
   function routePool(st) {
     const out = [];
     const b = branchCard();
     if (b) out.push(b);
     for (let i = 0; i < st.locked.length; i++) {
       if (st.canInstall) out.push(installCard(st.locked[i]));
-    }
-    for (let i = 0; i < ORGAN_ORDER.length; i++) {
-      const key = ORGAN_ORDER[i];
-      const o = organs[key];
-      if (o.owned && o.lv < ORGAN_LV_CAP) out.push(organCard(key));
-      else if (!o.owned && st.canInstall) out.push(organCard(key));
     }
     const t = tacticPool();
     for (let i = 0; i < t.length; i++) out.push(t[i]);
@@ -1429,20 +1432,15 @@
     return out;
   }
 
-  // 第 5 步兜底：只补可重复的专精/扩容/移速，禁止复制同一张生命卡凑数
-  function fallbackPool(st) {
-    const out = [];
-    for (let i = 0; i < st.owned.length; i++) {
-      const c = specializeCard(st.owned[i]);
-      if (c) out.push(c);
-    }
-    if (out.length === 0) { out.push(speedCard()); out.push(maxhpCard()); }
-    return out;
-  }
-
   function pickOne(list) {
     if (!list || list.length === 0) return null;
     return list[(Math.random() * list.length) | 0];
+  }
+
+  // 类别守门取牌：池子为空时走 fb() 生成同类别兜底卡，保证槽位永不跨类别
+  function safePick(pool, fb) {
+    if (!pool || pool.length === 0) return fb();
+    return pool[(Math.random() * pool.length) | 0];
   }
 
   function dealCards() {
@@ -1455,36 +1453,24 @@
     //    按规格 2.3"只给信息、不推荐最优解"，这份画像只用于预告展示，不参与卡池权重。
     const threat = nextWaveInfo();
 
-    // ③ 三类各生成一张候选 + ④ 移除满级/不可安装/互斥冲突/重复效果
-    const pools = [];
-    if (st.level >= LOOP_POOL_LEVEL) {
-      pools.push(strengthenPool(st));          // 循环池：专精强化为主
-      pools.push(tacticPool());               // 循环池：战术调频
-      pools.push(routePool(st));              // 循环池：互斥进化 / 安装
-    } else {
-      const up = [];
-      const ups = upgradeableSkills();
-      for (let i = 0; i < ups.length; i++) up.push(upgradeCard(ups[i]));
+    // ③ 三槽位固定顺序：强化当前构筑 / 补弱点 / 改变路线。
+    //    每槽位独立取牌，池子枯竭时降级到同类别兜底卡（绝不跨类别补位）。
+    const slot0 = safePick(strengthenPool(st), function() {
       const sp = specializePool(st);
-      for (let i = 0; i < sp.length; i++) up.push(sp[i]);
-      pools.push(up);                         // 强化当前构筑
-      pools.push(survivalPool(st));           // 补弱点（生存器官）
-      pools.push(routePool(st));              // 改变路线
-    }
+      return sp.length > 0 ? sp[(Math.random() * sp.length) | 0] : overclockCard();
+    });
+    const slot1 = safePick(survivalPool(st), function() { return maxhpCard(); });
+    const slot2 = safePick(routePool(st), function() {
+      const t = tacticPool();
+      return t.length > 0 ? t[(Math.random() * t.length) | 0] : tacticResetCard();
+    });
 
-    const used = {};
-    const out = [];
-    for (let c = 0; c < pools.length && out.length < 3; c++) {
-      const card = pickOne(pools[c]);
-      if (card && !used[card.sig]) { used[card.sig] = 1; out.push(card); }
+    const out = [slot0, slot1, slot2];
+
+    // ④ 类别断言：三张卡必须分属三个不同类别（只报警不中断，避免把 UI 卡死）
+    if (new Set(out.map(function(c) { return c.cat; })).size !== 3) {
+      console.error("[CategoryGate] 发牌类别重复:", out.map(function(c) { return c.cat + ":" + c.sig; }).join(", "));
     }
-    // ⑤ 某类耗尽：调用可重复强化补齐（不复制同一张生命卡）
-    const fb = fallbackPool(st);
-    for (let i = 0; i < fb.length && out.length < 3; i++) {
-      if (!used[fb[i].sig]) { used[fb[i].sig] = 1; out.push(fb[i]); }
-    }
-    // 理论上不可达的兜底：保证三张卡的形状完整
-    while (out.length < 3) out.push(maxhpCard());
 
     cards = out;
     previewInfo = threat; // 供升级界面顶部预告卡渲染
@@ -1576,6 +1562,15 @@
       case 'speed':
         speedMult *= SPEED_CARD_MULT;
         break;
+      case 'overclock':
+        // 过载超频：可重复，全武器伤害线性累加
+        allDmgBonus += 0.08;
+        break;
+      case 'tacticreset':
+        // 战术重整：可重复，先回血再叠经验乘区（不占槽）
+        player.hp = Math.min(player.maxHp, player.hp + 15);
+        xpMult *= 1.10;
+        break;
       case 'newskill': {
         // 槽满时不再允许安装新机能（只开放升级/进化）
         if (slotsUsed() >= MAX_SLOTS) break;
@@ -1583,6 +1578,7 @@
         if (!s || s.owned) break;
         s.owned = true;
         s.lv = 1;
+        pushToast('获得新技能：' + SKILL_META[card.skill].name);
         break;
       }
       case 'branchpick':
@@ -1590,6 +1586,7 @@
         if (!skills.needle.branch && samples >= BRANCH_SAMPLE_COST) {
           samples -= BRANCH_SAMPLE_COST;
           skills.needle.branch = card.branch;
+          pushToast('分支进化：' + card.title);
         }
         break;
       default:
@@ -1682,7 +1679,7 @@
     if (!uiOpen) return;
     ctx.save();
     // 半透明遮罩
-    ctx.fillStyle = 'rgba(7,18,29,0.72)';
+    ctx.fillStyle = UI_SCRIM_CARD;
     ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
 
     // 标题
@@ -1732,6 +1729,375 @@
       drawWrapText(card.desc, r.x + 14, r.y + 78, r.w - 28, 15);
     }
     ctx.restore();
+  }
+
+// ============================================================
+  // 规范 UI §7–§9：暂停面板 / 死亡结算 / 战斗提示条（+ UI 状态机）
+  // 坐标换算：设计稿基准 1080×1920，本作逻辑画布 360×640 → 统一 ÷3。
+  // 下面每个几何常量后面标注了 1080 基准坐标，方便与 ui-spec-v1.0.md 对照。
+  // ============================================================
+  const UIState = {
+    RUNNING: 'running', LEVEL_UP: 'level_up', EVOLUTION: 'evolution',
+    PAUSED: 'paused', DEAD: 'dead'
+  };
+  let paused = false;        // 暂停面板打开中
+  let dead = false;          // 死亡：冻结 + 结算面板
+  let confirmRestart = false;// 重新开始二次确认（只存在于暂停面板之上）
+
+  // 规范 §7 暂停：主面板 (174,598,732,724)÷3；按钮 (270,864/982/1100,540,96)÷3
+  // 无主菜单（项目尚未实现），故省略"返回主菜单"第三个按钮槽
+  const PAUSE_PANEL = { x: 58, y: 199, w: 244, h: 241, r: 9 };
+  const PAUSE_NOTE_Y = 417; // 底部说明"当前战斗进度尚未结束"基线中线
+  const BTN_CONTINUE = { x: 90, y: 288, w: 180, h: 32, r: 6 };
+  const BTN_RESTART = { x: 90, y: 327, w: 180, h: 32, r: 6 };
+  // 二次确认小卡（覆在暂停面板之上，防误触：只有两个按钮可点，点外面无反应）
+  const CONFIRM_PANEL = { x: 68, y: 252, w: 224, h: 136, r: 9 };
+  const BTN_CONFIRM_YES = { x: 82, y: 320, w: 96, h: 28, r: 6 };
+  const BTN_CONFIRM_NO = { x: 184, y: 320, w: 96, h: 28, r: 6 };
+  // HUD 暂停按钮 §3：(986,143,70,70)÷3；命中热区外扩到 ≥44 逻辑像素（手机可点）
+  const PAUSE_BTN = { x: 329, y: 48, w: 23, h: 23, r: 5 };
+  const PAUSE_BTN_HIT = { x: 318, y: 37, w: 42, h: 44 };
+  let pausePressT = 0;      // 暂停按钮按下态亮度 +12%（真实时间衰减）
+
+  // 规范 §8 死亡：主面板 (135,490,810,940)÷3
+  const DEATH_PANEL = { x: 45, y: 163, w: 270, h: 313, r: 9 };
+  // 四个数据模块 (205/563,792/938,312,122)÷3，按行主序：存活时间/击杀/等级/累计采样
+  const DEATH_STAT_W = 104, DEATH_STAT_H = 41;
+  const DEATH_STATS = [
+    { x: 68, y: 264 }, { x: 188, y: 264 },
+    { x: 68, y: 313 }, { x: 188, y: 313 }
+  ];
+  // 按钮 (252,1125/1245,576,96)÷3；无主菜单，只保留"再次挑战"
+  const BTN_RETRY = { x: 84, y: 375, w: 192, h: 32, r: 6 };
+
+  // 规范 §9 战斗提示条：(270,256,540,72)÷3，1.6s，淡入 0.15s / 淡出 0.25s
+  const TOAST = { x: 90, y: 85, w: 180, h: 24, r: 4 };
+  const TOAST_LIFE = 1.6, TOAST_FADE_IN = 0.15, TOAST_FADE_OUT = 0.25;
+  const TOAST_QUEUE_MAX = 3; // 同时最多一条，队列上限防止刷屏堆积
+  const toastQueue = [];      // 待显示文案
+  let toast = null;           // 当前显示中的 {text, t}
+
+  const UI_PURPLE = '#B45BE0';
+  const UI_GREEN = '#39FF6A';
+  const UI_ORANGE = '#FF7A1A';
+  const UI_RED = '#FF4D6D';
+  const UI_BG_DEEP = 'rgba(19,8,32,0.96)';       // #130820 96%
+  const UI_BG_BTN = 'rgba(49,23,84,0.96)';       // #311754 96%
+  const UI_SCRIM_PAUSE = 'rgba(9,3,18,0.78)';   // 暂停/死亡遮罩 78%
+  const UI_SCRIM_CARD = 'rgba(9,3,18,0.72)';    // 战斗模态遮罩 72%
+  // 中文优先用规范字体栈（等宽字体栈对 CJK 字形不佳，新面板一律用这个）
+  const UI_FONT = '"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif';
+
+  function uiFont(size, weight) { ctx.font = weight + ' ' + size + 'px ' + UI_FONT; }
+
+  // 单一真相：当前 UI 状态由既有标志位派生（uiOpen/branchMode/paused/dead），
+  // 优先级 DEAD > EVOLUTION > LEVEL_UP > PAUSED > RUNNING，任一时刻只有一个主模态
+  function currentUiState() {
+    if (dead) return UIState.DEAD;
+    if (uiOpen) return branchMode ? UIState.EVOLUTION : UIState.LEVEL_UP;
+    if (paused) return UIState.PAUSED;
+    return UIState.RUNNING;
+  }
+  // 冻结条件：升级/进化/暂停/死亡一律冻结 elapsed 与全部战斗逻辑
+  function isBattleFrozen() { return currentUiState() !== UIState.RUNNING; }
+
+  function hitRect(r, x, y) {
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  // ===== 战斗提示条（Toast 队列）=====
+  function pushToast(text) {
+    if (toastQueue.length >= TOAST_QUEUE_MAX) toastQueue.shift();
+    toastQueue.push(text);
+  }
+  // 模态/冻结期间既不显示新的提示，也不消耗已有提示的显示时间
+  function updateToasts(dt) {
+    if (isBattleFrozen()) return;
+    if (!toast) {
+      if (toastQueue.length === 0) return;
+      toast = { text: toastQueue.shift(), t: 0 };
+    }
+    toast.t += dt;
+    if (toast.t >= TOAST_LIFE) { toast = null; }
+  }
+  function drawToasts() {
+    if (!toast || isBattleFrozen()) return;
+    let a = 1;
+    if (toast.t < TOAST_FADE_IN) a = toast.t / TOAST_FADE_IN;
+    else if (toast.t > TOAST_LIFE - TOAST_FADE_OUT) a = (TOAST_LIFE - toast.t) / TOAST_FADE_OUT;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, a));
+    ctx.fillStyle = 'rgba(37,17,63,0.92)';
+    roundRect(TOAST.x, TOAST.y, TOAST.w, TOAST.h, TOAST.r);
+    ctx.fill();
+    ctx.strokeStyle = UI_PURPLE;
+    ctx.lineWidth = 1;
+    ctx.shadowColor = 'rgba(180,91,224,0.35)';
+    ctx.shadowBlur = 3;
+    roundRect(TOAST.x, TOAST.y, TOAST.w, TOAST.h, TOAST.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = COLOR_WHITE;
+    uiFont(12, '700');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(toast.text, TOAST.x + TOAST.w / 2, TOAST.y + TOAST.h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  // ===== 通用按钮绘制（规范：填充 + 描边 + 主题色发光）=====
+  function drawButton(r, label, strokeColor, glowBlur) {
+    ctx.fillStyle = UI_BG_BTN;
+    roundRect(r.x, r.y, r.w, r.h, r.r);
+    ctx.fill();
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1.4;
+    ctx.shadowColor = strokeColor;
+    ctx.shadowBlur = glowBlur;
+    roundRect(r.x, r.y, r.w, r.h, r.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = COLOR_WHITE;
+    uiFont(15, '700'); // 规范 46px ÷3
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2 + 0.5);
+  }
+
+  // ===== HUD 暂停按钮（规范 §3）=====
+  function drawPauseButton() {
+    const b = PAUSE_BTN;
+    ctx.save();
+    ctx.fillStyle = UI_PANEL;
+    roundRect(b.x, b.y, b.w, b.h, b.r);
+    ctx.fill();
+    ctx.strokeStyle = UI_PURPLE;
+    ctx.lineWidth = 1;
+    ctx.shadowColor = 'rgba(180,91,224,0.45)';
+    ctx.shadowBlur = 4;
+    roundRect(b.x, b.y, b.w, b.h, b.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    // 按下态亮度 +12%
+    if (pausePressT > 0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
+      roundRect(b.x, b.y, b.w, b.h, b.r);
+      ctx.fill();
+    }
+    // 白色双竖条图标：规范 26×32 ÷3 ≈ 8.7×10.7 居中
+    const iw = 8.7, ih = 10.7, barW = 2.4, gap = iw - barW * 2;
+    const ix = b.x + (b.w - iw) / 2, iy = b.y + (b.h - ih) / 2;
+    ctx.fillStyle = COLOR_WHITE;
+    ctx.fillRect(ix, iy, barW, ih);
+    ctx.fillRect(ix + barW + gap, iy, barW, ih);
+    ctx.restore();
+  }
+
+  // ===== 暂停面板（规范 §7）=====
+  function drawPauseUI() {
+    if (currentUiState() !== UIState.PAUSED) return;
+    ctx.save();
+    ctx.fillStyle = UI_SCRIM_PAUSE;
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    const p = PAUSE_PANEL;
+    ctx.fillStyle = 'rgba(37,17,63,0.96)'; // #25113F 96%
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.fill();
+    ctx.strokeStyle = UI_PURPLE;
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = 'rgba(180,91,224,0.7)';
+    ctx.shadowBlur = 9;
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = COLOR_WHITE;
+    uiFont(24, '700'); // 规范 72px ÷3
+    ctx.fillText('游戏暂停', p.x + p.w / 2, p.y + 42);
+    ctx.fillStyle = UI_TEXT_DIM;
+    uiFont(13, '400'); // 规范 40px ÷3
+    ctx.fillText('实验暂时中止', p.x + p.w / 2, p.y + 78);
+
+    drawButton(BTN_CONTINUE, '继续游戏', UI_GREEN, 6);
+    drawButton(BTN_RESTART, '重新开始', UI_ORANGE, 4);
+    ctx.fillStyle = UI_TEXT_MUT;
+    uiFont(11, '400'); // 规范 34px ÷3
+    ctx.fillText('当前战斗进度尚未结束', p.x + p.w / 2, PAUSE_NOTE_Y);
+
+    if (confirmRestart) drawConfirmUI();
+    ctx.restore();
+  }
+
+  // 重新开始二次确认（规范建议，防误触）
+  function drawConfirmUI() {
+    const p = CONFIRM_PANEL;
+    ctx.fillStyle = UI_BG_DEEP;
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.fill();
+    ctx.strokeStyle = UI_ORANGE;
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = 'rgba(255,122,26,0.7)';
+    ctx.shadowBlur = 9;
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = COLOR_WHITE;
+    uiFont(17, '700');
+    ctx.fillText('确认重新开始？', p.x + p.w / 2, p.y + 32);
+    ctx.fillStyle = UI_TEXT_DIM;
+    uiFont(11, '400');
+    ctx.fillText('当前进度将全部丢失', p.x + p.w / 2, p.y + 58);
+    drawButton(BTN_CONFIRM_YES, '确认重开', UI_ORANGE, 6);
+    drawButton(BTN_CONFIRM_NO, '取消', '#635677', 3);
+  }
+
+  // ===== 死亡结算面板（规范 §8）=====
+  function fmtRunTime(sec) {
+    const s = Math.max(0, sec);
+    if (s < 60) return s.toFixed(1) + '秒';
+    const m = Math.floor(s / 60);
+    return m + '分' + Math.floor(s - m * 60) + '秒';
+  }
+  function deathStatValues() {
+    return [
+      fmtRunTime(elapsed),               // 存活时间（elapsed 本就在冻结时不推进）
+      String(killCount),                 // 击杀
+      'Lv.' + playerLevel,               // 等级
+      String(runSamples)                 // 累计采样
+    ];
+  }
+  function drawDeathUI() {
+    if (currentUiState() !== UIState.DEAD) return;
+    ctx.save();
+    ctx.fillStyle = UI_SCRIM_PAUSE;
+    ctx.fillRect(0, 0, LOGICAL_W, LOGICAL_H);
+
+    const p = DEATH_PANEL;
+    ctx.fillStyle = UI_BG_DEEP;
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.fill();
+    ctx.strokeStyle = UI_RED;
+    ctx.lineWidth = 1.6;
+    ctx.shadowColor = 'rgba(255,77,109,0.55)';
+    ctx.shadowBlur = 10;
+    roundRect(p.x, p.y, p.w, p.h, p.r);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = UI_RED;
+    uiFont(24, '700'); // 规范 72px ÷3
+    ctx.fillText('培养皿崩溃', p.x + p.w / 2, p.y + 42);
+    ctx.fillStyle = UI_TEXT_DIM;
+    uiFont(13, '400');
+    ctx.fillText('本次实验已终止', p.x + p.w / 2, p.y + 76);
+
+    const titles = ['存活时间', '击杀', '等级', '累计采样'];
+    const vals = deathStatValues();
+    for (let i = 0; i < 4; i++) {
+      const r = DEATH_STATS[i];
+      ctx.fillStyle = UI_PANEL;
+      roundRect(r.x, r.y, DEATH_STAT_W, DEATH_STAT_H, 5);
+      ctx.fill();
+      ctx.strokeStyle = UI_PURPLE;
+      ctx.lineWidth = 1;
+      roundRect(r.x, r.y, DEATH_STAT_W, DEATH_STAT_H, 5);
+      ctx.stroke();
+      ctx.fillStyle = UI_TEXT_DIM;
+      uiFont(11, '400'); // 规范 32px ÷3
+      ctx.fillText(titles[i], r.x + DEATH_STAT_W / 2, r.y + 13);
+      ctx.fillStyle = COLOR_WHITE;
+      uiFont(16, '700'); // 规范 48px ÷3
+      ctx.fillText(vals[i], r.x + DEATH_STAT_W / 2, r.y + 29);
+    }
+
+    drawButton(BTN_RETRY, '再次挑战', UI_GREEN, 6);
+    ctx.restore();
+  }
+
+  // ===== 模态点击分发（返回 true = 已消费本次点击，不再当摇杆按下）=====
+  function handleModalTap(lx, ly) {
+    const st = currentUiState();
+    if (st === UIState.DEAD) {
+      if (hitRect(BTN_RETRY, lx, ly)) resetRun();
+      return true;
+    }
+    if (st === UIState.PAUSED) {
+      if (confirmRestart) {
+        if (hitRect(BTN_CONFIRM_YES, lx, ly)) { confirmRestart = false; resetRun(); }
+        else if (hitRect(BTN_CONFIRM_NO, lx, ly)) confirmRestart = false;
+      } else {
+        if (hitRect(BTN_CONTINUE, lx, ly)) { paused = false; clearStick(); }
+        else if (hitRect(BTN_RESTART, lx, ly)) confirmRestart = true;
+      }
+      return true;
+    }
+    if (st === UIState.LEVEL_UP || st === UIState.EVOLUTION) {
+      handleUiTap(lx, ly);
+      return true;
+    }
+    return false;
+  }
+
+  function clearStick() {
+    stick.x = 0;
+    stick.y = 0;
+    stick.active = false;
+    stick.pointerId = null;
+  }
+
+  function openPause() {
+    paused = true;
+    confirmRestart = false;
+    clearStick();
+  }
+
+  // ===== 重开：回滚本局全部状态 =====
+  function resetRun() {
+    player.x = LOGICAL_W / 2;
+    player.y = LOGICAL_H - 140;
+    player.hp = BASE_HP;
+    player.maxHp = BASE_HP;
+    player.invuln = 0;
+    player.animTime = 0;
+    player.hurtFlash = 0;
+    skills.needle.owned = true; skills.needle.lv = 1; skills.needle.branch = null;
+    skills.blade.owned = false; skills.blade.lv = 0; skills.blade.branch = null;
+    skills.arc.owned = false; skills.arc.lv = 0; skills.arc.branch = null;
+    // P2 生存器官（各占 1 槽）：重开必须清空，否则槽位与增益会跨局残留
+    organs.regen.owned = false; organs.regen.lv = 0;
+    organs.cilia.owned = false; organs.cilia.lv = 0;
+    // P2 专精累计与战术调频倒计时：清零（否则下一局伤害/受击带着上一局的加成）
+    for (const k in skillBonus) skillBonus[k] = 0;
+    for (const k in specCount) specCount[k] = 0;
+    for (const k in buffs) buffs[k] = 0;
+    allDmgBonus = 0; xpMult = 1;
+    playerLevel = 1; playerXp = 0; xpNext = XP_STEP; pendingLevels = 0;
+    samples = 0; runSamples = 0; killCount = 0; elapsed = 0;
+    speedMult = 1;
+    // 波次调度：i 回 -1 哨兵值，下一帧 updateWaveDirector 会 beginWave 重建 W1
+    waveNow.i = -1; waveNow.round = 0; waveNow.phase = 'preview';
+    waveNow.cursor = 0; waveNow.lastSpawnAt = -99;
+    waveNow.spawned = 0; waveNow.dropped = 0;
+    needleCd = NEEDLE_CD; arcCd = ARC_CD; bladeAngle = 0;
+    for (let i = 0; i < needles.length; i++) needles[i].active = false;
+    for (let i = 0; i < arcs.length; i++) arcs[i].life = 0;
+    for (let i = 0; i < particles.length; i++) particles[i].life = 0;
+    for (let i = 0; i < dmgNums.length; i++) dmgNums[i].life = 0;
+    for (let i = 0; i < samples_pool.length; i++) samples_pool[i].active = false;
+    // P2：敌人由 WaveDirector 动态投放（不再是固定池），重开直接清空数组
+    enemies.length = 0;
+    uiOpen = false; branchMode = false;
+    paused = false; dead = false; confirmRestart = false;
+    toastQueue.length = 0; toast = null;
+    hitStop = 0; shake = 0; pausePressT = 0;
+    clearStick();
   }
 
   // ===== 槽位 UI（左上 3x2 网格，霓虹发光描边）=====
@@ -1929,8 +2295,12 @@
   canvas.addEventListener('mousedown', function (e) {
     e.preventDefault();
     const p = toLogical(e.clientX, e.clientY);
-    // 三选一期间：点卡而不是摇杆
-    if (uiOpen) { handleUiTap(p.x, p.y); return; }
+    if (handleModalTap(p.x, p.y)) return;      // 模态期间屏蔽底层触控
+    if (hitRect(PAUSE_BTN_HIT, p.x, p.y)) {    // 暂停按钮：不吃掉摇杆
+      pausePressT = 0.12;
+      openPause();
+      return;
+    }
     stickDown({ id: 'mouse', x: p.x, y: p.y });
   });
   window.addEventListener('mousemove', function (e) {
@@ -1953,13 +2323,19 @@
     const t = e.changedTouches[0];
     if (!t) return;
     const p = toLogical(t.clientX, t.clientY);
-    if (uiOpen) { handleUiTap(p.x, p.y); return; }
+    if (handleModalTap(p.x, p.y)) return;      // 模态期间屏蔽底层触控
+    if (hitRect(PAUSE_BTN_HIT, p.x, p.y)) {    // 暂停按钮：不吃掉摇杆
+      pausePressT = 0.12;
+      openPause();
+      return;
+    }
     stickDown({ id: t.identifier, x: p.x, y: p.y });
   }, { passive: false });
 
   canvas.addEventListener('touchmove', function (e) {
     e.preventDefault();
-    if (uiOpen) return; // 选卡时不响应拖动，避免点卡变成移动
+    // 选卡/暂停/死亡时不响应拖动，避免点按钮变成移动
+    if (isBattleFrozen()) return;
     // 取合并触摸事件的最新位置，减少输入延迟
     const list = (e.getCoalescedEvents && e.getCoalescedEvents()) || e.changedTouches;
     for (let i = 0; i < list.length; i++) {
@@ -2130,6 +2506,8 @@
 
   // ===== 摇杆绘制 =====
   function drawStick(dt) {
+    // 升级/进化/暂停/死亡期间不画摇杆（规范 §4：摇杆不出现在模态面板之下）
+    if (isBattleFrozen()) return;
     if (stick.active) {
       // 底座圆圈
       ctx.save();
@@ -2216,11 +2594,14 @@
       hitStop -= dt;
       if (hitStop < 0) hitStop = 0;
       stopped = true;
-    } else if (uiOpen) {
-      // 升级三选一：逻辑时钟与战场一起冻结（预告倒计时随之暂停，
+    } else if (isBattleFrozen()) {
+      // 升级 / 进化 / 暂停 / 死亡：elapsed 与全部战斗逻辑一起冻结，
+      // 但 draw() 照常跑（战场定格在模态面板下）。Toast 显示时间同样不消耗。
+      // 冻结 elapsed 即冻结 WaveDirector 时钟（预告倒计时随之暂停，
       // 保证"预告用真实调度数据"：玩家看到的秒数就是实际还要打的秒数）
       stopped = true;
-    } else {      elapsed += dt;
+    } else {
+      elapsed += dt;
 
       // 定步长子步进：此前单帧 dt 钳在 0.05s，导致帧率低于 20fps 时游戏时间比真实时间慢
       // （角色/敌人全部慢动作——正是"慢半拍"的根因）。子步进保证帧率再低，速度也与真实时间一致。
@@ -2234,37 +2615,31 @@
         guard++;
       }
     }
-    // 微顿/选卡期间不给摇杆回中插值喂 dt，保持定格的一致性
+    // 冻结/微顿期间不给摇杆回中插值喂 dt，保持定格的一致性
     lastDt = stopped ? 0 : dt;
+    // 提示条与暂停按钮按真实时间推进（按钮按下态要在冻结时也能消退）
+    if (pausePressT > 0) pausePressT = Math.max(0, pausePressT - dt);
+    if (!stopped) updateToasts(dt);
 
     draw(elapsed);
     requestAnimationFrame(frame);
   }
 
   function update(dt) {
-    // 三选一期间冻结整个逻辑更新（战场静止，避免边选卡边挨打）
-    if (uiOpen) return;
+    // 模态期间冻结整个逻辑更新（战场静止，避免边选卡边挨打 / 暂停时偷跑）
+    if (isBattleFrozen()) return;
 
     // —— WaveDirector：唯一的出怪入口（同一时钟 elapsed，硬规则 6）——
     updateWaveDirector();
     // 摘除已消失的个体（死亡淡出结束 / 退场结束）：倒序换位，不打断迭代
     compactEnemies(dt);
 
-    // —— 玩家移动（摇杆归一化方向 × 移速 × 构筑移速乘区 × 战术调频）；死亡复活读秒时不动 ——
-    if (player.deadT <= 0) {
+    // —— 玩家移动（摇杆归一化方向 × 移速 × 构筑移速乘区 × 战术调频）——
+    {
       const moveLen = Math.hypot(stick.x, stick.y);
       if (moveLen > 0.001) {
         player.x += stick.x * PLAYER_SPEED * speedMult * buffHaste() * dt;
         player.y += stick.y * PLAYER_SPEED * speedMult * buffHaste() * dt;
-      }
-    } else {
-      // 死亡：1.2s 后原地满血复活，残留敌人一次清空（P1 极简，不做结算）
-      player.deadT -= dt;
-      if (player.deadT <= 0) {
-        player.deadT = 0;
-        player.hp = player.maxHp;
-        player.invuln = 1.0;
-        clearEnemies();
       }
     }
     clampToBounds(player, player.size / 2, player.size / 2);
@@ -2340,7 +2715,8 @@
         e.y = player.y + qy / qd * minD;
       }
       // 接触伤害：怪贴住主角就咬（0.45s 无敌帧），伤害按种类，受代谢抑制影响
-      if (qd < minD + 4 && player.invuln <= 0 && player.deadT <= 0) {
+      // dead 期间不再判伤（死亡已冻结战场，结算面板接管）
+      if (qd < minD + 4 && player.invuln <= 0 && !dead) {
         const dmg = e.touchDmg * buffGuard();
         player.hp -= dmg;
         player.invuln = INVOKED_IFRAME;
@@ -2348,8 +2724,11 @@
         shake = Math.min(shake + 3, 8);
         spawnDmgNum(player.x, player.y - 10, dmg);
         if (player.hp <= 0) {
+          // 死亡即本局结束：冻结战场 + 结算面板（不再原地复活）
           player.hp = 0;
-          player.deadT = 1.2; // P1 极简死亡：1.2s 后原地满血复活
+          dead = true;
+          clearStick();
+          return; // 立刻结束本次 update：本帧不再跑剩余敌人移动/武器/样本/升级结算
         }
       }
     }
@@ -2365,8 +2744,8 @@
     updateDmgNums(dt);
     updateSamples();
 
-    // —— 升级结算：有待用等级且玩家活着且 UI 没开 → 弹三选一 ——
-    if (pendingLevels > 0 && player.deadT <= 0 && !uiOpen) openLevelUp();
+    // —— 升级结算：有待用等级且玩家没死且 UI 没开 → 弹三选一 ——
+    if (pendingLevels > 0 && !dead && !uiOpen) openLevelUp();
   }
 
   function draw(t) {
@@ -2417,9 +2796,10 @@
     ctx.setTransform(scale, 0, 0, scale, offX, offY);
     drawStick(dtForStick());
 
-    // 构筑 HUD：左上槽位 + 右上样本计数 + 底部下一波预告
+    // 构筑 HUD：左上槽位 + 右上样本计数 + 右上角暂停按钮 + 底部下一波预告
     drawSlots();
     drawSampleCount();
+    drawPauseButton();
     drawWavePreviewHud();
 
     // 血条（顶部居中，霓虹样式）
@@ -2463,19 +2843,13 @@
       ctx.globalAlpha = 1;
     }
 
-    // 死亡：中央提示（P1 极简）
-    if (player.deadT > 0) {
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, player.deadT);
-      ctx.fillStyle = '#ff5a5a';
-      ctx.font = 'bold 20px ui-monospace, monospace';
-      ctx.textAlign = 'center';
-      ctx.fillText('信号中断…', LOGICAL_W / 2, LOGICAL_H / 2 - 40);
-      ctx.restore();
-    }
+    // 战斗提示条（规范 §9）：模态期间不显示，也不消耗显示时间
+    drawToasts();
 
-    // 三选一 UI（最上层，压住一切）
+    // 模态（最上层，压住一切）：死亡 > 三选一/分支 > 暂停
     drawLevelUpUI();
+    drawPauseUI();
+    drawDeathUI();
   }
 
   // drawStick 需要 dt 做回中插值，这里保存最近一帧的 dt
