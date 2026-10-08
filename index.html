@@ -68,6 +68,26 @@
   const ENEMY_R = ENEMY_SIZE / 2; // 敌人逻辑半径（碰撞用）
   const PLAYER_R = 12; // 主角逻辑半径（size 24 / 2；怪不许叠进人的推开距离用）
 
+  // ===== 敌人种类（P2 决策测试：不同怪需要不同解法）=====
+  // normal 感染体：均衡；swift 疾行体：快/脆/咬轻，遛不掉，优先点杀；
+  // armored 重甲体：慢/硬/咬重，经验多，"打不打它"本身是决策
+  const ENEMY_KINDS = {
+    normal:  { speed: 110, hp: 35,  touch: 6,  size: 16, color: '#E8823C', xp: 1, samples: 1, weight: 8 },
+    swift:   { speed: 140, hp: 20,  touch: 4,  size: 12, color: '#D8E83C', xp: 1, samples: 1, weight: 4 },
+    armored: { speed: 70,  hp: 120, touch: 10, size: 22, color: '#B45BE0', xp: 3, samples: 2, weight: 2 },
+  };
+  const KIND_KEYS = ['normal', 'swift', 'armored'];
+  function rollKind() {
+    let total = 0;
+    for (let i = 0; i < KIND_KEYS.length; i++) total += ENEMY_KINDS[KIND_KEYS[i]].weight;
+    let r = Math.random() * total;
+    for (let i = 0; i < KIND_KEYS.length; i++) {
+      r -= ENEMY_KINDS[KIND_KEYS[i]].weight;
+      if (r <= 0) return KIND_KEYS[i];
+    }
+    return 'normal';
+  }
+
   // ===== 战斗参数（Prototype 1）=====
   const ENEMY_MAX_HP = 35;   // 敌人血量上限
   const RESPAWN_TIME = 1.0;  // 死亡后重生延迟（秒）
@@ -237,6 +257,8 @@
 
   function spawnEnemy(i) {
     const p = edgePoint(i);
+    const kind = rollKind();
+    const K = ENEMY_KINDS[kind];
     enemies.push({
       x: p.x,
       y: p.y,
@@ -246,10 +268,16 @@
       seed: (i / ENEMY_COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.25,
       wobble: 0.6 + Math.random() * 0.8, // 每只细胞的蠕动相位频率
       orbitR: 30 + Math.random() * 16,   // 包围半径：瞄准玩家周围而非玩家中心，避免堆叠成一团
-      sprite: ENEMY_SPRITES[i % ENEMY_SPRITES.length],         // 预渲染精灵
-      spriteWhite: ENEMY_WHITE_SPRITES[i % ENEMY_WHITE_SPRITES.length], // 受击白闪用的纯白版
-      hp: ENEMY_MAX_HP,
-      maxHp: ENEMY_MAX_HP,
+      kind: kind,                        // normal / swift / armored
+      speed: K.speed,
+      touchDmg: K.touch,
+      xpValue: K.xp,
+      sampleValue: K.samples,
+      er: K.size / 2,                    // 本体碰撞半径（按种类）
+      sprite: ENEMY_SPRITES[kind],         // 预渲染精灵（按种类）
+      spriteWhite: ENEMY_WHITE_SPRITES[kind], // 受击白闪用的纯白版
+      hp: K.hp,
+      maxHp: K.hp,
       alive: true,
       respawnT: 0,
       flash: 0,
@@ -258,14 +286,25 @@
     });
   }
 
-  // 死亡后原地重生：回到屏幕边缘，血量回满
+  // 死亡后原地重生：回到屏幕边缘，血量回满，种类重 roll
   function respawnEnemy(e, i) {
     const p = edgePoint(i);
+    const kind = rollKind();
+    const K = ENEMY_KINDS[kind];
     e.x = p.x;
     e.y = p.y;
     e.vx = 0;
     e.vy = 0;
-    e.hp = e.maxHp;
+    e.kind = kind;
+    e.speed = K.speed;
+    e.touchDmg = K.touch;
+    e.xpValue = K.xp;
+    e.sampleValue = K.samples;
+    e.er = K.size / 2;
+    e.sprite = ENEMY_SPRITES[kind];
+    e.spriteWhite = ENEMY_WHITE_SPRITES[kind];
+    e.hp = K.hp;
+    e.maxHp = K.hp;
     e.alive = true;
     e.respawnT = 0;
     e.flash = 0;
@@ -274,14 +313,14 @@
     e.sy = 0;
   }
 
-  // 敌人精灵烘焙（2x 超采样：96px 画布对应 48 逻辑像素），3 种形态轮换
-  function makeEnemySprite(seed) {
+  // 敌人精灵烘焙（2x 超采样：96px 画布对应 48 逻辑像素），按种类烘焙（颜色+尺寸）
+  function makeEnemySprite(seed, color, size) {
     const S = 96;
     const c = document.createElement('canvas');
     c.width = S; c.height = S;
     const g = c.getContext('2d');
     const cx = S / 2, cy = S / 2;
-    const r = (ENEMY_SIZE / 2) * 2; // 逻辑半径 8 → 精灵内 16
+    const r = (size / 2) * 2; // 逻辑直径 size → 精灵内半径
     function blob(x, y, rr, sd, inflate) {
       const lobes = 7;
       g.beginPath();
@@ -298,8 +337,8 @@
     // 深紫描边底
     g.fillStyle = COLOR_OUTLINE;
     blob(cx, cy, r + 4.4, seed, 2); g.fill();
-    // 橙色主体
-    g.fillStyle = COLOR_ENEMY;
+    // 种类色主体
+    g.fillStyle = color;
     blob(cx, cy, r, seed, 0); g.fill();
     // 内部暗核 + 高光
     g.fillStyle = COLOR_OUTLINE; g.globalAlpha = 0.55;
@@ -309,7 +348,11 @@
     g.globalAlpha = 1;
     return c;
   }
-  const ENEMY_SPRITES = [makeEnemySprite(0.7), makeEnemySprite(2.83), makeEnemySprite(4.96)];
+  const ENEMY_SPRITES = {
+    normal: makeEnemySprite(0.7, ENEMY_KINDS.normal.color, ENEMY_KINDS.normal.size),
+    swift: makeEnemySprite(2.1, ENEMY_KINDS.swift.color, ENEMY_KINDS.swift.size),
+    armored: makeEnemySprite(4.2, ENEMY_KINDS.armored.color, ENEMY_KINDS.armored.size),
+  };
 
   // 受击白闪：把精灵拷到离屏画布，用 source-in 只保留形状填成纯白
   function makeWhiteVersion(src) {
@@ -322,11 +365,11 @@
     g.fillRect(0, 0, c.width, c.height);
     return c;
   }
-  const ENEMY_WHITE_SPRITES = [
-    makeWhiteVersion(ENEMY_SPRITES[0]),
-    makeWhiteVersion(ENEMY_SPRITES[1]),
-    makeWhiteVersion(ENEMY_SPRITES[2])
-  ];
+  const ENEMY_WHITE_SPRITES = {
+    normal: makeWhiteVersion(ENEMY_SPRITES.normal),
+    swift: makeWhiteVersion(ENEMY_SPRITES.swift),
+    armored: makeWhiteVersion(ENEMY_SPRITES.armored)
+  };
 
   for (let i = 0; i < ENEMY_COUNT; i++) spawnEnemy(i);
 
@@ -495,9 +538,9 @@
       hitStop = HIT_STOP;
       // 死亡震屏：叠加但封顶 7px，连杀不糊
       shake = Math.min(shake + 2.5, 7);
-      // P2：死亡给构筑资源（经验 + 样本）
-      gainXp(1);
-      dropSample(e.x, e.y);
+      // P2：死亡给构筑资源（经验 + 样本，按种类：重甲给 3 经验 2 样本）
+      gainXp(e.xpValue);
+      for (let k = 0; k < e.sampleValue; k++) dropSample(e.x, e.y);
       // 处决针：目标死亡清零叠层（换目标/死亡清零规则的一部分）
       if (e === execTarget) { execTarget = null; execCount = 0; }
     }
@@ -633,7 +676,8 @@
         const e = enemies[j];
         if (!e.alive) continue;
         const dx = e.x - p.x, dy = e.y - p.y;
-        if (dx * dx + dy * dy <= NEEDLE_HIT_R2) {
+        const hr = e.er + NEEDLE_R; // 按怪体型算命中半径
+        if (dx * dx + dy * dy <= hr * hr) {
           hitEnemy(e, needleHitDamage(e));
           spawnSparks(p.x, p.y);
           p.active = false; // 命中即回收
@@ -715,7 +759,8 @@
       if (!e.alive || e.bladeCd > 0) continue;
       for (let b = 0; b < BLADE_COUNT; b++) {
         const dx = e.x - bladeX[b], dy = e.y - bladeY[b];
-        if (dx * dx + dy * dy <= BLADE_HIT_R2) {
+        const hr = e.er + BLADE_R; // 按怪体型算命中半径
+        if (dx * dx + dy * dy <= hr * hr) {
           e.bladeCd = BLADE_CD;
           hitEnemy(e, bladeDmg());
           spawnSparks(e.x, e.y);
@@ -1653,27 +1698,27 @@
       const dx = tx - e.x;
       const dy = ty - e.y;
       const d = Math.hypot(dx, dy) || 1;
-      // 朝包围点移动 + 分离推力
-      e.vx = (dx / d) * ENEMY_SPEED + e.sx;
-      e.vy = (dy / d) * ENEMY_SPEED + e.sy;
+      // 朝包围点移动 + 分离推力（速度按种类）
+      e.vx = (dx / d) * e.speed + e.sx;
+      e.vy = (dy / d) * e.speed + e.sy;
       e.x += e.vx * dt;
       e.y += e.vy * dt;
       // 怪-人位置推开（只推怪，不碰主角速度）：P0 关掉的是"怪撞人"的击退手感，
-      // 这里补的是视觉分离——怪不许叠进主角。包围点在 30-46px，推开距离 20px 不打架。
+      // 这里补的是视觉分离——怪不许叠进主角。推开距离按怪体型算。
       const qx = e.x - player.x, qy = e.y - player.y;
       const qd = Math.hypot(qx, qy);
-      const minD = PLAYER_R + ENEMY_R;
+      const minD = PLAYER_R + e.er;
       if (qd < minD && qd > 0.0001) {
         e.x = player.x + qx / qd * minD;
         e.y = player.y + qy / qd * minD;
       }
-      // 接触伤害：怪贴住主角就咬（0.45s 无敌帧）。P1 之前怪是木桩，这是威胁的来源。
+      // 接触伤害：怪贴住主角就咬（0.45s 无敌帧），伤害按种类
       if (qd < minD + 4 && player.invuln <= 0 && player.deadT <= 0) {
-        player.hp -= ENEMY_TOUCH_DMG;
+        player.hp -= e.touchDmg;
         player.invuln = INVOKED_IFRAME;
         player.hurtFlash = 0.3;
         shake = Math.min(shake + 3, 8);
-        spawnDmgNum(player.x, player.y - 10, ENEMY_TOUCH_DMG);
+        spawnDmgNum(player.x, player.y - 10, e.touchDmg);
         if (player.hp <= 0) {
           player.hp = 0;
           player.deadT = 1.2; // P1 极简死亡：1.2s 后原地满血复活
