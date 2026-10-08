@@ -605,7 +605,8 @@
     g.fill();
     return c;
   }
-  const needleSprite = makeNeedleSprite();
+  const needleSprite = new Image();
+  needleSprite.src = 'assets/icons/needle-bullet.png';
   const NEEDLE_L = 20, NEEDLE_HGT = 6;
 
   const needles = [];
