@@ -1150,6 +1150,18 @@
     if (line.length > 0) ctx.fillText(line, x, yy);
   }
 
+  // ===== UI 样式规范（GPT-6 设计稿，2026-10-08）=====
+  const UI_PANEL = 'rgba(37,17,63,0.88)';   // 面板深紫 #25113F @88%
+  const UI_TEXT_DIM = '#D8CFFF';            // 次级文字
+  const UI_TEXT_MUT = '#8F7DAA';            // 弱化文字
+  const CAT_COLORS = {                      // 三选一类别色
+    '强化当前构筑': '#39FF6A',               // 霓虹绿
+    '补弱点': '#FF7A1A',                    // 霓虹橙
+    '改变路线': '#B45BE0',                  // 霓虹紫
+    '分支进化': '#B45BE0',                  // 分支是改变路线的子集
+    '返回': '#8F7DAA',                      // 弱化灰
+  };
+
   function drawLevelUpUI() {
     if (!uiOpen) return;
     ctx.save();
@@ -1166,35 +1178,43 @@
     for (let i = 0; i < cardRects.length; i++) {
       const r = cardRects[i];
       const card = r.card;
-      // 卡面
-      ctx.fillStyle = card.kind === 'back' ? 'rgba(24,20,32,0.9)' : 'rgba(14,34,48,0.95)';
-      roundRect(r.x, r.y, r.w, r.h, 10);
+      const catColor = CAT_COLORS[card.cat] || COLOR_PLAYER;
+      // 卡面：深紫面板 + 类别色发光描边
+      ctx.fillStyle = UI_PANEL;
+      roundRect(r.x, r.y, r.w, r.h, 12);
       ctx.fill();
-      ctx.strokeStyle = card.kind === 'back' ? 'rgba(243,247,250,0.25)' : COLOR_PLAYER;
-      ctx.lineWidth = card.kind === 'branch' ? 2.4 : 1.4;
-      roundRect(r.x, r.y, r.w, r.h, 10);
+      ctx.strokeStyle = catColor;
+      ctx.lineWidth = 2;
+      ctx.shadowColor = catColor;
+      ctx.shadowBlur = 12;
+      roundRect(r.x, r.y, r.w, r.h, 12);
       ctx.stroke();
+      ctx.shadowBlur = 0;
 
-      // 类别小标签
+      // 类别胶囊标签
       ctx.textAlign = 'left';
       ctx.font = 'bold 10px ui-monospace, monospace';
-      ctx.fillStyle = COLOR_SAMPLE;
-      ctx.fillText(card.cat, r.x + 12, r.y + 18);
+      const catW = ctx.measureText(card.cat).width + 12;
+      ctx.fillStyle = catColor;
+      roundRect(r.x + 12, r.y + 8, catW, 16, 8);
+      ctx.fill();
+      ctx.fillStyle = '#1A0B2E';
+      ctx.fillText(card.cat, r.x + 18, r.y + 20);
 
       // 技能名（强化卡按技能色）
       ctx.font = 'bold 16px ui-monospace, monospace';
       ctx.fillStyle = (card.skill && SKILL_META[card.skill]) ? SKILL_META[card.skill].color : COLOR_WHITE;
-      ctx.fillText(card.title, r.x + 12, r.y + 42);
+      ctx.fillText(card.title, r.x + 12, r.y + 48);
 
       // 说明（长文本折行）
       ctx.font = '11px ui-monospace, monospace';
-      ctx.fillStyle = 'rgba(243,247,250,0.75)';
-      drawWrapText(card.desc, r.x + 12, r.y + 62, r.w - 24, 14);
+      ctx.fillStyle = UI_TEXT_DIM;
+      drawWrapText(card.desc, r.x + 12, r.y + 68, r.w - 24, 14);
     }
     ctx.restore();
   }
 
-  // ===== 槽位 UI（左上角 4 格）=====
+  // ===== 槽位 UI（左上角 4 格，霓虹发光描边）=====
   function drawSlots() {
     const x0 = 8, y0 = 8, gap = 4;
     ctx.save();
@@ -1204,20 +1224,23 @@
       const key = SKILL_ORDER[i];
       const s = key ? skills[key] : null;
       if (s && s.owned) {
-        ctx.fillStyle = 'rgba(10,22,32,0.7)';
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
+        const sc = SKILL_META[key].color;
+        ctx.fillStyle = UI_PANEL;
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
         ctx.fill();
-        ctx.fillStyle = SKILL_META[key].color;
-        ctx.globalAlpha = 0.9;
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
-        ctx.fill();
-        ctx.globalAlpha = 1;
-        ctx.fillStyle = COLOR_OUTLINE;
+        ctx.strokeStyle = sc;
+        ctx.lineWidth = 2;
+        ctx.shadowColor = sc;
+        ctx.shadowBlur = 8;
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = sc;
         ctx.font = 'bold 13px ui-monospace, monospace';
-        ctx.fillText(SKILL_META[key].short, x + SLOT_UI_SIZE / 2, y0 + 14);
+        ctx.fillText(SKILL_META[key].short, x + SLOT_UI_SIZE / 2, y0 + 15);
         ctx.fillStyle = COLOR_WHITE;
         ctx.font = 'bold 8px ui-monospace, monospace';
-        ctx.fillText('Lv' + s.lv, x + SLOT_UI_SIZE / 2, y0 + 26);
+        ctx.fillText('Lv' + s.lv, x + SLOT_UI_SIZE / 2, y0 + 27);
         // 分支进化标记
         if (s.branch) {
           ctx.fillStyle = COLOR_SAMPLE;
@@ -1225,22 +1248,35 @@
           ctx.fillText('*', x + SLOT_UI_SIZE - 5, y0 + 10);
         }
       } else {
-        ctx.strokeStyle = 'rgba(243,247,250,0.22)';
+        ctx.strokeStyle = 'rgba(143,125,170,0.35)';
         ctx.lineWidth = 1.2;
-        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 6);
+        roundRect(x, y0, SLOT_UI_SIZE, SLOT_UI_SIZE, 8);
         ctx.stroke();
       }
     }
     ctx.restore();
   }
 
-  // ===== 样本计数（右上角）=====
+  // ===== 样本计数（右上角，培养皿胶囊）=====
   function drawSampleCount() {
     ctx.save();
-    ctx.textAlign = 'right';
     ctx.font = 'bold 12px ui-monospace, monospace';
+    const label = '样本 ×' + samples;
+    const w = ctx.measureText(label).width + 20;
+    const x = LOGICAL_W - 10 - w;
+    ctx.fillStyle = UI_PANEL;
+    roundRect(x, 8, w, 24, 12);
+    ctx.fill();
+    ctx.strokeStyle = COLOR_SAMPLE;
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = COLOR_SAMPLE;
+    ctx.shadowBlur = 6;
+    roundRect(x, 8, w, 24, 12);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'center';
     ctx.fillStyle = COLOR_SAMPLE;
-    ctx.fillText('样本 ×' + samples, LOGICAL_W - 10, 22);
+    ctx.fillText(label, x + w / 2, 24);
     ctx.restore();
   }
 
@@ -1793,15 +1829,40 @@
     drawSlots();
     drawSampleCount();
 
-    // 血条（顶部居中）
-    const hbW = 120, hbH = 8, hbX = (LOGICAL_W - hbW) / 2, hbY = 10;
-    ctx.fillStyle = 'rgba(10,20,28,0.7)';
-    ctx.fillRect(hbX - 1, hbY - 1, hbW + 2, hbH + 2);
+    // 血条（顶部居中，霓虹样式）
+    const hbW = 120, hbH = 10, hbX = (LOGICAL_W - hbW) / 2, hbY = 10;
+    ctx.fillStyle = UI_PANEL;
+    roundRect(hbX - 2, hbY - 2, hbW + 4, hbH + 4, 6);
+    ctx.fill();
     const hpK = player.hp / player.maxHp;
-    ctx.fillStyle = hpK > 0.3 ? '#38e8e0' : '#ff5a5a';
-    ctx.fillRect(hbX, hbY, hbW * hpK, hbH);
+    const hpColor = hpK > 0.3 ? '#50F5A9' : '#FF4D6D';
+    if (hpK > 0) {
+      ctx.fillStyle = hpColor;
+      ctx.shadowColor = hpColor;
+      ctx.shadowBlur = 6;
+      roundRect(hbX, hbY, Math.max(4, hbW * hpK), hbH, 5);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
 
-    // 受击红闪（全屏低透明红）
+    // 经验条（血条下方，霓虹绿）
+    const xbW = 120, xbH = 6, xbX = (LOGICAL_W - xbW) / 2, xbY = hbY + hbH + 6;
+    ctx.fillStyle = UI_PANEL;
+    roundRect(xbX - 2, xbY - 2, xbW + 4, xbH + 4, 4);
+    ctx.fill();
+    const xpK = Math.min(1, xp / xpNext);
+    if (xpK > 0) {
+      ctx.fillStyle = '#50F5A9';
+      ctx.shadowColor = '#50F5A9';
+      ctx.shadowBlur = 5;
+      roundRect(xbX, xbY, Math.max(3, xbW * xpK), xbH, 3);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+    ctx.fillStyle = UI_TEXT_MUT;
+    ctx.font = 'bold 8px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Lv.' + playerLevel, LOGICAL_W / 2, xbY + xbH + 10);
     if (player.hurtFlash > 0) {
       ctx.globalAlpha = Math.min(0.35, player.hurtFlash);
       ctx.fillStyle = '#ff3b3b';
