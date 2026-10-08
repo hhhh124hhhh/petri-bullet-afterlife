@@ -224,10 +224,19 @@
     arc:    { owned: false, lv: 0, branch: null }
   };
   const SKILL_META = {
-    needle: { name: '脉冲针', short: '针', color: '#38E8E0' },
-    blade:  { name: '离心刃', short: '刃', color: '#7EB6FF' },
-    arc:    { name: '培养电弧', short: '弧', color: '#B98CFF' }
+    needle: { name: '脉冲针', short: '针', color: '#38E8E0', icon: 'assets/icons/needle.png' },
+    blade:  { name: '离心刃', short: '刃', color: '#7EB6FF', icon: null },
+    arc:    { name: '培养电弧', short: '弧', color: '#B98CFF', icon: null }
   };
+  // 技能图标预加载
+  const SKILL_ICONS = {};
+  for (const k in SKILL_META) {
+    if (SKILL_META[k].icon) {
+      const img = new Image();
+      img.src = SKILL_META[k].icon;
+      SKILL_ICONS[k] = img;
+    }
+  }
   let playerLevel = 1;
   let playerXp = 0;
   let xpNext = XP_STEP;  // 升到 n+1 级需 n*XP_STEP 点经验
@@ -1237,12 +1246,19 @@
         roundRect(x, y, S, S, 9);
         ctx.stroke();
         ctx.shadowBlur = 0;
-        ctx.fillStyle = sc;
-        ctx.font = 'bold 14px ui-monospace, monospace';
-        ctx.fillText(SKILL_META[key].short, x + S / 2, y + 17);
+        // 技能图标（有图画图，无图画文字）
+        const icon = SKILL_ICONS[key];
+        if (icon && icon.complete && icon.naturalWidth > 0) {
+          const isz = 22;
+          ctx.drawImage(icon, x + (S - isz) / 2, y + 3, isz, isz);
+        } else {
+          ctx.fillStyle = sc;
+          ctx.font = 'bold 14px ui-monospace, monospace';
+          ctx.fillText(SKILL_META[key].short, x + S / 2, y + 17);
+        }
         ctx.fillStyle = COLOR_WHITE;
         ctx.font = 'bold 9px ui-monospace, monospace';
-        ctx.fillText('Lv' + s.lv, x + S / 2, y + 29);
+        ctx.fillText('Lv' + s.lv, x + S / 2, y + 31);
         if (s.branch) {
           ctx.fillStyle = COLOR_SAMPLE;
           ctx.font = 'bold 9px ui-monospace, monospace';
